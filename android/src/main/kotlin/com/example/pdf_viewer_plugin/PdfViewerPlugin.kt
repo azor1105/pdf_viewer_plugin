@@ -227,6 +227,7 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 currentTransX = detector.focusX - (detector.focusX - currentTransX) * realFactor
                 currentTransY = detector.focusY - (detector.focusY - currentTransY) * realFactor
                 currentScale = newScale
+                clampTransX()
                 applyTransform()
                 return true
             }
@@ -267,6 +268,7 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                     lastScrollTime = System.currentTimeMillis()
                     currentTransX -= distanceX
                     currentTransY -= distanceY
+                    clampTransX()
                     applyTransform()
                     return true
                 }
@@ -324,6 +326,14 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
             })
             start()
         }
+    }
+
+    private fun clampTransX() {
+        // Page fills the layout width, so at the current scale the valid horizontal
+        // translation range is [width*(1-scale), 0]:  left edge can't go right of the
+        // screen left, and right edge can't go left of the screen right.
+        val minTransX = width.toFloat() * (1f - currentScale)
+        currentTransX = currentTransX.coerceIn(minTransX, 0f)
     }
 
     private fun applyTransform() {
