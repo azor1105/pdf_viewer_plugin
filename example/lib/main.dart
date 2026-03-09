@@ -12,12 +12,8 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
-        appBar: AppBar(
-          title: const Text('PDF Viewer Example'),
-        ),
-        body: const PdfViewer(
-          assetPath: 'assets/pdf/sample.pdf',
-        ),
+        appBar: AppBar(title: const Text('PDF Viewer Example')),
+        body: const PdfViewer(assetPath: 'assets/pdf/sample.pdf'),
       ),
     );
   }
