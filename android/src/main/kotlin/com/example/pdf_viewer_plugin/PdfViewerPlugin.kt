@@ -6,7 +6,12 @@ import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
@@ -15,6 +20,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.LruCache
 import android.view.GestureDetector
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -22,6 +28,7 @@ import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.TextView
 import androidx.annotation.RequiresExtension
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
@@ -33,6 +40,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
+import kotlin.math.roundToInt
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -176,6 +184,27 @@ class PdfPlatformView(
         }
         zoomLayout.addView(recyclerView)
         container.addView(zoomLayout)
+
+        // Page scrubber overlay — sits on top of zoomLayout, right-aligned, vertically adaptive
+        val scrubber = PageScrubberView(context, recyclerView, adapter.pageCount)
+        val dp = context.resources.displayMetrics.density
+        val circleSize = (50 * dp).toInt()
+        // Width is wide enough to draw the label pill to the left of the circle
+        val scrubberWidth = (150 * dp).toInt()
+        val scrubberParams = FrameLayout.LayoutParams(scrubberWidth, circleSize).apply {
+            gravity = Gravity.TOP or Gravity.END
+            marginEnd = (8 * dp).toInt()
+            topMargin = (8 * dp).toInt()
+        }
+        container.addView(scrubber, scrubberParams)
+
+        // Keep scrubber page label in sync when the user scrolls normally
+        recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                val lm = rv.layoutManager as? LinearLayoutManager ?: return
+                scrubber.updatePage(lm.findFirstVisibleItemPosition())
+            }
+        })
     }
 
     private fun copyAssetToCache(context: Context, assetKey: String): File {
@@ -439,6 +468,8 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
 
     override fun getItemCount(): Int = renderer.pageCount
 
+    val pageCount: Int get() = renderer.pageCount
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageViewHolder {
         val imageView = ImageView(parent.context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -522,4 +553,148 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     }
 
     class PageViewHolder(val imageView: ImageView) : RecyclerView.ViewHolder(imageView)
+}
+
+/**
+ * A 50×50dp circular handle on the left edge of the PDF viewer.
+ * Drag it up/down to scroll through pages; it shows "current / total" while active.
+ */
+class PageScrubberView(
+    context: Context,
+    private val recyclerView: RecyclerView,
+    private val totalPages: Int
+) : View(context) {
+
+    private val dp = resources.displayMetrics.density
+    private val circleR = 25 * dp
+    // Circle is flush to the right edge of this view; label is drawn to its left
+    private val circleCx get() = width - circleR
+    private val circleCy get() = height / 2f
+
+    private var currentPage = 0
+    private var isDragging = false
+
+    private val hideHandler = Handler(Looper.getMainLooper())
+    private val hideRunnable = Runnable {
+        isDragging = false
+        invalidate()
+    }
+
+    private val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(210, 30, 30, 30)
+    }
+    private val labelBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(210, 30, 30, 30)
+    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+        textSize = 12 * dp
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        strokeWidth = 2.5f * dp
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        style = Paint.Style.STROKE
+    }
+
+    // Called by the scroll listener to keep the position in sync during normal scrolling
+    fun updatePage(page: Int) {
+        if (currentPage == page) return
+        currentPage = page
+        repositionVertically()
+        invalidate()
+    }
+
+    // Reposition the scrubber vertically based on current page ratio
+    private fun repositionVertically() {
+        val parent = parent as? View ?: return
+        val parentH = parent.height.takeIf { it > 0 } ?: return
+        val viewH = height.takeIf { it > 0 } ?: return
+        val marginDp = (8 * dp).toInt()
+        val travelRange = (parentH - viewH - marginDp * 2).toFloat().coerceAtLeast(0f)
+        val ratio = if (totalPages <= 1) 0f else currentPage.toFloat() / (totalPages - 1)
+        translationY = ratio * travelRange
+    }
+
+    // Recalculate position when the view is laid out for the first time
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        repositionVertically()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val cx = circleCx
+        val cy = circleCy
+
+        if (isDragging) {
+            // Draw label pill to the LEFT of the circle
+            val label = "${currentPage + 1} / $totalPages"
+            val labelPadH = 14 * dp
+            val labelPadV = 10 * dp
+            val labelW = textPaint.measureText(label) + labelPadH * 2
+            val labelH = textPaint.textSize + labelPadV * 2
+            val pillRight = cx - circleR - 10 * dp
+            val pillLeft = pillRight - labelW
+            val pillTop = cy - labelH / 2f
+            val pillBottom = cy + labelH / 2f
+            canvas.drawRoundRect(RectF(pillLeft, pillTop, pillRight, pillBottom), labelH / 2f, labelH / 2f, labelBgPaint)
+            val textY = cy - (textPaint.ascent() + textPaint.descent()) / 2f
+            canvas.drawText(label, pillLeft + labelW / 2f, textY, textPaint)
+        }
+
+        // Circle background
+        canvas.drawCircle(cx, cy, circleR, circlePaint)
+
+        // Up arrow
+        val aw = 10 * dp
+        val upTipY = cy - 8 * dp
+        canvas.drawLine(cx - aw / 2f, upTipY + 6 * dp, cx, upTipY, arrowPaint)
+        canvas.drawLine(cx, upTipY, cx + aw / 2f, upTipY + 6 * dp, arrowPaint)
+        // Down arrow
+        val downTipY = cy + 8 * dp
+        canvas.drawLine(cx - aw / 2f, downTipY - 6 * dp, cx, downTipY, arrowPaint)
+        canvas.drawLine(cx, downTipY, cx + aw / 2f, downTipY - 6 * dp, arrowPaint)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Touch is only active inside the circle
+        val dx = event.x - circleCx
+        val dy = event.y - circleCy
+        val inCircle = dx * dx + dy * dy <= circleR * circleR
+
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                if (!inCircle) return false
+                isDragging = true
+                hideHandler.removeCallbacks(hideRunnable)
+                invalidate()
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!isDragging) return true
+                val parentView = parent as? View ?: return true
+                val parentLoc = IntArray(2)
+                parentView.getLocationOnScreen(parentLoc)
+                val relY = event.rawY - parentLoc[1]
+                val fraction = (relY / parentView.height).coerceIn(0f, 1f)
+                val targetPage = (fraction * (totalPages - 1)).roundToInt().coerceIn(0, totalPages - 1)
+                if (targetPage != currentPage) {
+                    currentPage = targetPage
+                    (recyclerView.layoutManager as? LinearLayoutManager)
+                        ?.scrollToPositionWithOffset(targetPage, 0)
+                    repositionVertically()
+                    invalidate()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                hideHandler.postDelayed(hideRunnable, 1200)
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
 }
