@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.example.pdf_viewer_plugin">
+
+    <uses-sdk tools:overrideLibrary="androidx.pdf, androidx.pdf.viewer, androidx.pdf.viewer.fragment, androidx.pdf.document.service" />
+
+    <application>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.pdf_viewer_plugin.provider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/pdf_viewer_plugin_file_paths" />
+        </provider>
+    </application>
+</manifest>
