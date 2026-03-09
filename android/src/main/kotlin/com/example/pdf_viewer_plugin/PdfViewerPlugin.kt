@@ -201,9 +201,13 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
     private val minScale = 1.0f
     private val maxScale = 5.0f
     private val doubleTapScale = 2.5f
+
+    // The transform is: screen_pos = child_pos * scale + translation
+    // Pivot is pinned to (0,0) on the child; all panning is done via translationX/Y.
+    // translationX/Y have no Android-imposed clamping, so panning is fully free.
     private var currentScale = 1.0f
-    private var pivotPointX = 0f
-    private var pivotPointY = 0f
+    private var currentTransX = 0f
+    private var currentTransY = 0f
 
     var onZoomChanged: ((Float) -> Unit)? = null
 
@@ -212,13 +216,15 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val newScale = (currentScale * detector.scaleFactor).coerceIn(minScale, maxScale)
-                if (newScale != currentScale) {
-                    // Set pivot to pinch focal point relative to this layout
-                    pivotPointX = detector.focusX
-                    pivotPointY = detector.focusY
-                    currentScale = newScale
-                    applyTransform()
-                }
+                val realFactor = newScale / currentScale
+                if (realFactor == 1f) return true
+                // Keep the focal point (detector.focusX/Y) fixed on screen:
+                //   screen = child * scale + trans
+                //   trans' = focusX - (focusX - trans) * realFactor
+                currentTransX = detector.focusX - (detector.focusX - currentTransX) * realFactor
+                currentTransY = detector.focusY - (detector.focusY - currentTransY) * realFactor
+                currentScale = newScale
+                applyTransform()
                 return true
             }
 
@@ -232,21 +238,14 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         context,
         object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                val targetScale: Float
-                val targetPivotX: Float
-                val targetPivotY: Float
                 if (currentScale > 1.05f) {
-                    // Zoom out to 1x
-                    targetScale = 1.0f
-                    targetPivotX = width / 2f
-                    targetPivotY = height / 2f
+                    animateToTransform(1.0f, 0f, 0f)
                 } else {
-                    // Zoom in to doubleTapScale at tap location
-                    targetScale = doubleTapScale
-                    targetPivotX = e.x
-                    targetPivotY = e.y
+                    val factor = doubleTapScale / currentScale
+                    val targetTransX = e.x - (e.x - currentTransX) * factor
+                    val targetTransY = e.y - (e.y - currentTransY) * factor
+                    animateToTransform(doubleTapScale, targetTransX, targetTransY)
                 }
-                animateZoom(targetScale, targetPivotX, targetPivotY)
                 return true
             }
 
@@ -257,10 +256,9 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 distanceY: Float
             ): Boolean {
                 if (currentScale > 1.0f) {
-                    // Pan by shifting the pivot in the opposite direction of the drag
-                    pivotPointX += distanceX / currentScale
-                    pivotPointY += distanceY / currentScale
-                    clampPivot()
+                    // distanceX/Y are positive when the finger moves left/up, so subtract
+                    currentTransX -= distanceX
+                    currentTransY -= distanceY
                     applyTransform()
                     return true
                 }
@@ -269,25 +267,23 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         }
     )
 
-    private fun animateZoom(targetScale: Float, targetPivotX: Float, targetPivotY: Float) {
+    private fun animateToTransform(targetScale: Float, targetTransX: Float, targetTransY: Float) {
         val startScale = currentScale
-        val startPivotX = pivotPointX
-        val startPivotY = pivotPointY
+        val startTransX = currentTransX
+        val startTransY = currentTransY
 
         ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 250
             interpolator = DecelerateInterpolator()
             addUpdateListener { anim ->
-                val fraction = anim.animatedValue as Float
-                currentScale = startScale + (targetScale - startScale) * fraction
-                pivotPointX = startPivotX + (targetPivotX - startPivotX) * fraction
-                pivotPointY = startPivotY + (targetPivotY - startPivotY) * fraction
-                clampPivot()
+                val f = anim.animatedValue as Float
+                currentScale = startScale + (targetScale - startScale) * f
+                currentTransX = startTransX + (targetTransX - startTransX) * f
+                currentTransY = startTransY + (targetTransY - startTransY) * f
                 applyTransform()
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
-                    // Notify after animation has fully settled
                     onZoomChanged?.invoke(targetScale)
                 }
             })
@@ -311,40 +307,14 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         return true
     }
 
-    private fun clampPivot() {
-        val child = getChildAt(0) ?: return
-        val childW = child.width.toFloat()
-        val childH = child.height.toFloat()
-        if (childW == 0f || childH == 0f) return
-
-        // Compute how much of the child is visible at the current scale
-        val visibleW = width / currentScale
-        val visibleH = height / currentScale
-
-        // Pivot must stay in a range so the scaled content covers the viewport
-        val minPivotX = visibleW / 2f
-        val maxPivotX = childW - visibleW / 2f
-        val minPivotY = visibleH / 2f
-        val maxPivotY = childH - visibleH / 2f
-
-        if (maxPivotX > minPivotX) {
-            pivotPointX = pivotPointX.coerceIn(minPivotX, maxPivotX)
-        } else {
-            pivotPointX = childW / 2f
-        }
-        if (maxPivotY > minPivotY) {
-            pivotPointY = pivotPointY.coerceIn(minPivotY, maxPivotY)
-        } else {
-            pivotPointY = childH / 2f
-        }
-    }
-
     private fun applyTransform() {
         val child = getChildAt(0) ?: return
-        child.pivotX = pivotPointX
-        child.pivotY = pivotPointY
+        child.pivotX = 0f
+        child.pivotY = 0f
         child.scaleX = currentScale
         child.scaleY = currentScale
+        child.translationX = currentTransX
+        child.translationY = currentTransY
     }
 }
 
