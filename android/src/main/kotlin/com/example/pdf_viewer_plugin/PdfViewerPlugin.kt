@@ -1,5 +1,6 @@
 package com.example.pdf_viewer_plugin
 
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
@@ -11,8 +12,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.LruCache
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.annotation.RequiresExtension
@@ -142,6 +147,9 @@ class PdfPlatformView(
 
     private fun loadWithFallbackRenderer(file: File) {
         val screenWidth = context.resources.displayMetrics.widthPixels
+        val adapter = FallbackPdfRendererAdapter(file, screenWidth)
+        pdfRendererAdapter = adapter
+
         val recyclerView = RecyclerView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -150,11 +158,20 @@ class PdfPlatformView(
             layoutManager = LinearLayoutManager(context)
             setHasFixedSize(true)
             setItemViewCacheSize(6)
+            this.adapter = adapter
         }
-        container.addView(recyclerView)
-        val adapter = FallbackPdfRendererAdapter(file, screenWidth)
-        pdfRendererAdapter = adapter
-        recyclerView.adapter = adapter
+
+        val zoomLayout = ZoomableLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            onZoomChanged = { zoomLevel ->
+                adapter.updateZoomLevel(zoomLevel)
+            }
+        }
+        zoomLayout.addView(recyclerView)
+        container.addView(zoomLayout)
     }
 
     private fun copyAssetToCache(context: Context, assetKey: String): File {
@@ -177,6 +194,154 @@ class PdfPlatformView(
     }
 }
 
+class ZoomableLayout(context: Context) : FrameLayout(context) {
+
+    private val minScale = 1.0f
+    private val maxScale = 5.0f
+    private val doubleTapScale = 2.5f
+    private var currentScale = 1.0f
+    private var pivotPointX = 0f
+    private var pivotPointY = 0f
+
+    var onZoomChanged: ((Float) -> Unit)? = null
+
+    private val scaleDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val newScale = (currentScale * detector.scaleFactor).coerceIn(minScale, maxScale)
+                if (newScale != currentScale) {
+                    // Set pivot to pinch focal point relative to this layout
+                    pivotPointX = detector.focusX
+                    pivotPointY = detector.focusY
+                    currentScale = newScale
+                    applyTransform()
+                }
+                return true
+            }
+
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                onZoomChanged?.invoke(currentScale)
+            }
+        }
+    )
+
+    private val gestureDetector = GestureDetector(
+        context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                val targetScale: Float
+                val targetPivotX: Float
+                val targetPivotY: Float
+                if (currentScale > 1.05f) {
+                    // Zoom out to 1x
+                    targetScale = 1.0f
+                    targetPivotX = width / 2f
+                    targetPivotY = height / 2f
+                } else {
+                    // Zoom in to doubleTapScale at tap location
+                    targetScale = doubleTapScale
+                    targetPivotX = e.x
+                    targetPivotY = e.y
+                }
+                animateZoom(targetScale, targetPivotX, targetPivotY)
+                return true
+            }
+
+            override fun onScroll(
+                e1: MotionEvent?,
+                e2: MotionEvent,
+                distanceX: Float,
+                distanceY: Float
+            ): Boolean {
+                if (currentScale > 1.0f) {
+                    // Pan by shifting the pivot in the opposite direction of the drag
+                    pivotPointX += distanceX / currentScale
+                    pivotPointY += distanceY / currentScale
+                    clampPivot()
+                    applyTransform()
+                    return true
+                }
+                return false
+            }
+        }
+    )
+
+    private fun animateZoom(targetScale: Float, targetPivotX: Float, targetPivotY: Float) {
+        val startScale = currentScale
+        val startPivotX = pivotPointX
+        val startPivotY = pivotPointY
+
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 250
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { anim ->
+                val fraction = anim.animatedValue as Float
+                currentScale = startScale + (targetScale - startScale) * fraction
+                pivotPointX = startPivotX + (targetPivotX - startPivotX) * fraction
+                pivotPointY = startPivotY + (targetPivotY - startPivotY) * fraction
+                clampPivot()
+                applyTransform()
+            }
+            start()
+        }
+        // Notify after animation target is set
+        handler?.postDelayed({ onZoomChanged?.invoke(targetScale) }, 300)
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        scaleDetector.onTouchEvent(ev)
+        gestureDetector.onTouchEvent(ev)
+        return currentScale > 1.0f || scaleDetector.isInProgress
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        scaleDetector.onTouchEvent(event)
+        gestureDetector.onTouchEvent(event)
+
+        if (!scaleDetector.isInProgress && currentScale <= 1.0f) {
+            return super.onTouchEvent(event)
+        }
+        return true
+    }
+
+    private fun clampPivot() {
+        val child = getChildAt(0) ?: return
+        val childW = child.width.toFloat()
+        val childH = child.height.toFloat()
+        if (childW == 0f || childH == 0f) return
+
+        // Compute how much of the child is visible at the current scale
+        val visibleW = width / currentScale
+        val visibleH = height / currentScale
+
+        // Pivot must stay in a range so the scaled content covers the viewport
+        val minPivotX = visibleW / 2f
+        val maxPivotX = childW - visibleW / 2f
+        val minPivotY = visibleH / 2f
+        val maxPivotY = childH - visibleH / 2f
+
+        if (maxPivotX > minPivotX) {
+            pivotPointX = pivotPointX.coerceIn(minPivotX, maxPivotX)
+        } else {
+            pivotPointX = childW / 2f
+        }
+        if (maxPivotY > minPivotY) {
+            pivotPointY = pivotPointY.coerceIn(minPivotY, maxPivotY)
+        } else {
+            pivotPointY = childH / 2f
+        }
+    }
+
+    private fun applyTransform() {
+        val child = getChildAt(0) ?: return
+        child.pivotX = pivotPointX
+        child.pivotY = pivotPointY
+        child.scaleX = currentScale
+        child.scaleY = currentScale
+    }
+}
+
 class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     RecyclerView.Adapter<FallbackPdfRendererAdapter.PageViewHolder>() {
 
@@ -186,13 +351,18 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     private val renderExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Track current render zoom so bitmaps are rendered at matching resolution
+    private var renderZoom = 1.0f
+    // Cache key encodes both page index and zoom level
+    private fun cacheKey(position: Int, zoom: Float): Int =
+        position * 1000 + (zoom * 100).toInt()
+
     private data class PageInfo(val width: Int, val height: Int)
     private val pageInfoList: List<PageInfo>
 
     private val bitmapCache: LruCache<Int, Bitmap>
 
     init {
-        // Precompute page dimensions so layout heights are stable during scroll
         pageInfoList = (0 until renderer.pageCount).map { i ->
             val page = renderer.openPage(i)
             val info = PageInfo(page.width, page.height)
@@ -200,11 +370,19 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
             info
         }
 
-        // Use 1/4 of available app memory for bitmap cache
         val maxMemoryKB = (Runtime.getRuntime().maxMemory() / 1024).toInt()
         bitmapCache = object : LruCache<Int, Bitmap>(maxMemoryKB / 4) {
             override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount / 1024
         }
+    }
+
+    fun updateZoomLevel(zoomLevel: Float) {
+        // Cap render resolution at 3x to prevent OOM
+        val newRenderZoom = zoomLevel.coerceIn(1.0f, 3.0f)
+        if ((newRenderZoom * 100).toInt() == (renderZoom * 100).toInt()) return
+        renderZoom = newRenderZoom
+        // Re-render all visible items at the new resolution
+        notifyDataSetChanged()
     }
 
     private fun scaledHeight(position: Int): Int {
@@ -226,32 +404,30 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     }
 
     override fun onBindViewHolder(holder: PageViewHolder, position: Int) {
-        // Set correct height upfront to prevent scroll jumps
         holder.imageView.layoutParams = holder.imageView.layoutParams.apply {
             width = ViewGroup.LayoutParams.MATCH_PARENT
             height = scaledHeight(position)
         }
 
-        // Serve from cache if available
-        val cached = bitmapCache.get(position)
+        val key = cacheKey(position, renderZoom)
+        val cached = bitmapCache.get(key)
         if (cached != null && !cached.isRecycled) {
             holder.imageView.setImageBitmap(cached)
             return
         }
 
-        // Show white placeholder while rendering
         holder.imageView.setImageBitmap(null)
         holder.imageView.setBackgroundColor(Color.WHITE)
 
-        // Tag to validate async result against recycled views
-        val tag = position
+        val tag = key
         holder.imageView.tag = tag
+        val currentRenderZoom = renderZoom
 
-        // Render on background thread to keep UI thread free
         renderExecutor.execute {
             try {
-                val bitmap = renderPage(position) ?: return@execute
-                bitmapCache.put(position, bitmap)
+                val bitmap = renderPage(position, currentRenderZoom) ?: return@execute
+                val cacheKey = cacheKey(position, currentRenderZoom)
+                bitmapCache.put(cacheKey, bitmap)
                 mainHandler.post {
                     if (holder.imageView.tag == tag) {
                         holder.imageView.setImageBitmap(bitmap)
@@ -267,13 +443,14 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     }
 
     @Synchronized
-    private fun renderPage(position: Int): Bitmap? {
+    private fun renderPage(position: Int, zoom: Float): Bitmap? {
         if (position < 0 || position >= renderer.pageCount) return null
         val page = renderer.openPage(position)
         val info = pageInfoList[position]
-        val scale = screenWidth.toFloat() / info.width
-        val width = (info.width * scale).toInt()
-        val height = (info.height * scale).toInt()
+        val baseScale = screenWidth.toFloat() / info.width
+        val renderScale = baseScale * zoom
+        val width = (info.width * renderScale).toInt()
+        val height = (info.height * renderScale).toInt()
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
         page.close()
