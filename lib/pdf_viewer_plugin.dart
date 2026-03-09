@@ -40,26 +40,15 @@ class PdfViewer extends StatelessWidget {
       creationParams['filePath'] = filePath;
     }
 
-    return PlatformViewLink(
+    return AndroidView(
       viewType: 'pdf_viewer_plugin_view',
-      surfaceFactory: (context, controller) {
-        return AndroidViewSurface(
-          controller: controller as AndroidViewController,
-          gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
-          hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-        );
-      },
-      onCreatePlatformView: (params) {
-        return PlatformViewsService.initSurfaceAndroidView(
-            id: params.id,
-            viewType: 'pdf_viewer_plugin_view',
-            layoutDirection: TextDirection.ltr,
-            creationParams: creationParams,
-            creationParamsCodec: const StandardMessageCodec(),
-            onFocus: () => params.onFocusChanged(true),
-          )
-          ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
-          ..create();
+      layoutDirection: TextDirection.ltr,
+      creationParams: creationParams,
+      creationParamsCodec: const StandardMessageCodec(),
+      gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+        Factory<VerticalDragGestureRecognizer>(
+          () => VerticalDragGestureRecognizer(),
+        ),
       },
     );
   }
