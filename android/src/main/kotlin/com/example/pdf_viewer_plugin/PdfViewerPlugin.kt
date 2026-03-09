@@ -160,6 +160,8 @@ class PdfPlatformView(
             layoutManager = LinearLayoutManager(context)
             setHasFixedSize(true)
             setItemViewCacheSize(6)
+            overScrollMode = RecyclerView.OVER_SCROLL_NEVER
+            isNestedScrollingEnabled = false
             this.adapter = adapter
         }
 
@@ -202,12 +204,13 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
     private val maxScale = 5.0f
     private val doubleTapScale = 2.5f
 
-    // The transform is: screen_pos = child_pos * scale + translation
-    // Pivot is pinned to (0,0) on the child; all panning is done via translationX/Y.
-    // translationX/Y have no Android-imposed clamping, so panning is fully free.
     private var currentScale = 1.0f
     private var currentTransX = 0f
     private var currentTransY = 0f
+
+    // Timestamp of the last scroll/pan event; used to suppress accidental double-taps
+    // that the GestureDetector falsely detects when the user re-touches after panning.
+    private var lastScrollTime = 0L
 
     var onZoomChanged: ((Float) -> Unit)? = null
 
@@ -215,12 +218,12 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
-                val newScale = (currentScale * detector.scaleFactor).coerceIn(minScale, maxScale)
+                // Clamp the raw factor to ignore spurious near-zero values emitted
+                // by some devices when the second finger lifts.
+                val safeFactor = detector.scaleFactor.coerceIn(0.7f, 1.43f)
+                val newScale = (currentScale * safeFactor).coerceIn(minScale, maxScale)
                 val realFactor = newScale / currentScale
                 if (realFactor == 1f) return true
-                // Keep the focal point (detector.focusX/Y) fixed on screen:
-                //   screen = child * scale + trans
-                //   trans' = focusX - (focusX - trans) * realFactor
                 currentTransX = detector.focusX - (detector.focusX - currentTransX) * realFactor
                 currentTransY = detector.focusY - (detector.focusY - currentTransY) * realFactor
                 currentScale = newScale
@@ -238,13 +241,18 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         context,
         object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
+                // Ignore a double-tap that happens right after a pan gesture — the
+                // user likely just re-touched after hitting the screen edge while panning.
+                if (System.currentTimeMillis() - lastScrollTime < 350L) return false
                 if (currentScale > 1.05f) {
                     animateToTransform(1.0f, 0f, 0f)
                 } else {
                     val factor = doubleTapScale / currentScale
-                    val targetTransX = e.x - (e.x - currentTransX) * factor
-                    val targetTransY = e.y - (e.y - currentTransY) * factor
-                    animateToTransform(doubleTapScale, targetTransX, targetTransY)
+                    animateToTransform(
+                        doubleTapScale,
+                        e.x - (e.x - currentTransX) * factor,
+                        e.y - (e.y - currentTransY) * factor
+                    )
                 }
                 return true
             }
@@ -256,7 +264,7 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 distanceY: Float
             ): Boolean {
                 if (currentScale > 1.0f) {
-                    // distanceX/Y are positive when the finger moves left/up, so subtract
+                    lastScrollTime = System.currentTimeMillis()
                     currentTransX -= distanceX
                     currentTransY -= distanceY
                     applyTransform()
@@ -264,8 +272,35 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 }
                 return false
             }
+
+            override fun onFling(
+                e1: MotionEvent?,
+                e2: MotionEvent,
+                velocityX: Float,
+                velocityY: Float
+            ): Boolean {
+                // Consume fling when zoomed so it doesn't leak into the RecyclerView.
+                return currentScale > 1.0f
+            }
         }
     )
+
+    // Route all touch events through dispatchTouchEvent so each event is seen by
+    // the detectors exactly once.  onInterceptTouchEvent and onTouchEvent then
+    // only read the resulting state — they never feed events to the detectors again.
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        scaleDetector.onTouchEvent(ev)
+        gestureDetector.onTouchEvent(ev)
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        return currentScale > 1.0f || scaleDetector.isInProgress
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        return currentScale > 1.0f || scaleDetector.isInProgress
+    }
 
     private fun animateToTransform(targetScale: Float, targetTransX: Float, targetTransY: Float) {
         val startScale = currentScale
@@ -289,22 +324,6 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
             })
             start()
         }
-    }
-
-    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
-        scaleDetector.onTouchEvent(ev)
-        gestureDetector.onTouchEvent(ev)
-        return currentScale > 1.0f || scaleDetector.isInProgress
-    }
-
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        scaleDetector.onTouchEvent(event)
-        gestureDetector.onTouchEvent(event)
-
-        if (!scaleDetector.isInProgress && currentScale <= 1.0f) {
-            return super.onTouchEvent(event)
-        }
-        return true
     }
 
     private fun applyTransform() {
