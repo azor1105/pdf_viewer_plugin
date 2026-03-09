@@ -329,11 +329,18 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
     }
 
     private fun clampTransX() {
-        // Page fills the layout width, so at the current scale the valid horizontal
-        // translation range is [width*(1-scale), 0]:  left edge can't go right of the
-        // screen left, and right edge can't go left of the screen right.
+        // When fully zoomed out, snap both axes to zero so no stale offset remains.
+        if (currentScale <= minScale) {
+            currentTransX = 0f
+            currentTransY = 0f
+            return
+        }
+        // Horizontal: left/right page edges must stay within screen bounds.
         val minTransX = width.toFloat() * (1f - currentScale)
         currentTransX = currentTransX.coerceIn(minTransX, 0f)
+        // Vertical: top/bottom page edges must stay within screen bounds.
+        val minTransY = height.toFloat() * (1f - currentScale)
+        currentTransY = currentTransY.coerceIn(minTransY, 0f)
     }
 
     private fun applyTransform() {
