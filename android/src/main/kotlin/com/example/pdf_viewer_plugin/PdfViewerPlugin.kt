@@ -293,6 +293,16 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(ev)
         gestureDetector.onTouchEvent(ev)
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                // Cache the child to a GPU texture before any gesture begins so that
+                // every subsequent pan/zoom frame is a pure matrix transform on the GPU
+                // with no CPU-side redraw of page bitmaps.
+                if (currentScale > 1.0f) enableHardwareLayer()
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> enableHardwareLayer()
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> disableHardwareLayer()
+        }
         return super.dispatchTouchEvent(ev)
     }
 
@@ -304,11 +314,20 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         return currentScale > 1.0f || scaleDetector.isInProgress
     }
 
+    private fun enableHardwareLayer() {
+        getChildAt(0)?.setLayerType(LAYER_TYPE_HARDWARE, null)
+    }
+
+    private fun disableHardwareLayer() {
+        getChildAt(0)?.setLayerType(LAYER_TYPE_NONE, null)
+    }
+
     private fun animateToTransform(targetScale: Float, targetTransX: Float, targetTransY: Float) {
         val startScale = currentScale
         val startTransX = currentTransX
         val startTransY = currentTransY
 
+        enableHardwareLayer()
         ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 250
             interpolator = DecelerateInterpolator()
@@ -321,6 +340,7 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    disableHardwareLayer()
                     onZoomChanged?.invoke(targetScale)
                 }
             })
