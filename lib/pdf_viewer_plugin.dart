@@ -55,3 +55,11 @@ class PdfViewer extends StatelessWidget {
     );
   }
 }
+// TODO:
+// 1. horizontal and vertical scroll support
+// 2. handler for changing pages programmatically and that will show the current page number and total page count
+// 3. support for text selection and copying to clipboard
+
+// LATER:
+// 4. support for searching text in the PDF and highlighting search results
+// 5. support for annotations and comments
