@@ -49,12 +49,8 @@ class PdfViewer extends StatelessWidget {
         Factory<VerticalDragGestureRecognizer>(
           () => VerticalDragGestureRecognizer(),
         ),
-        Factory<ScaleGestureRecognizer>(
-          () => ScaleGestureRecognizer(),
-        ),
-        Factory<EagerGestureRecognizer>(
-          () => EagerGestureRecognizer(),
-        ),
+        Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
+        Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
       },
     );
   }

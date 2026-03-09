@@ -1,5 +1,7 @@
 package com.example.pdf_viewer_plugin
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
@@ -283,10 +285,14 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 clampPivot()
                 applyTransform()
             }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    // Notify after animation has fully settled
+                    onZoomChanged?.invoke(targetScale)
+                }
+            })
             start()
         }
-        // Notify after animation target is set
-        handler?.postDelayed({ onZoomChanged?.invoke(targetScale) }, 300)
     }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
@@ -357,6 +363,14 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     private fun cacheKey(position: Int, zoom: Float): Int =
         position * 1000 + (zoom * 100).toInt()
 
+    // Always holds the most recently rendered bitmap for each page (any zoom level),
+    // used as a low-res placeholder while the high-res version is rendering.
+    private val lastRenderedBitmap = HashMap<Int, Bitmap>()
+
+    // Debounce token: only the latest scheduled re-render runs
+    private var pendingRenderRunnable: Runnable? = null
+    private val debounceDelayMs = 400L
+
     private data class PageInfo(val width: Int, val height: Int)
     private val pageInfoList: List<PageInfo>
 
@@ -377,12 +391,19 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     }
 
     fun updateZoomLevel(zoomLevel: Float) {
-        // Cap render resolution at 3x to prevent OOM
         val newRenderZoom = zoomLevel.coerceIn(1.0f, 3.0f)
         if ((newRenderZoom * 100).toInt() == (renderZoom * 100).toInt()) return
-        renderZoom = newRenderZoom
-        // Re-render all visible items at the new resolution
-        notifyDataSetChanged()
+
+        // Cancel any previously scheduled re-render
+        pendingRenderRunnable?.let { mainHandler.removeCallbacks(it) }
+
+        // Schedule re-render; if another call arrives within the delay it resets the timer
+        val runnable = Runnable {
+            renderZoom = newRenderZoom
+            notifyDataSetChanged()
+        }
+        pendingRenderRunnable = runnable
+        mainHandler.postDelayed(runnable, debounceDelayMs)
     }
 
     private fun scaledHeight(position: Int): Int {
@@ -416,8 +437,14 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
             return
         }
 
-        holder.imageView.setImageBitmap(null)
-        holder.imageView.setBackgroundColor(Color.WHITE)
+        // Show the last known bitmap for this page as a placeholder so there's no white flash
+        val placeholder = lastRenderedBitmap[position]
+        if (placeholder != null && !placeholder.isRecycled) {
+            holder.imageView.setImageBitmap(placeholder)
+        } else {
+            holder.imageView.setImageBitmap(null)
+            holder.imageView.setBackgroundColor(Color.WHITE)
+        }
 
         val tag = key
         holder.imageView.tag = tag
@@ -428,7 +455,9 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
                 val bitmap = renderPage(position, currentRenderZoom) ?: return@execute
                 val cacheKey = cacheKey(position, currentRenderZoom)
                 bitmapCache.put(cacheKey, bitmap)
+                // Always keep track of the freshest bitmap for placeholder use
                 mainHandler.post {
+                    lastRenderedBitmap[position] = bitmap
                     if (holder.imageView.tag == tag) {
                         holder.imageView.setImageBitmap(bitmap)
                     }
@@ -458,8 +487,10 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     }
 
     fun close() {
+        pendingRenderRunnable?.let { mainHandler.removeCallbacks(it) }
         renderExecutor.shutdownNow()
         bitmapCache.evictAll()
+        lastRenderedBitmap.clear()
         renderer.close()
         fileDescriptor.close()
     }
