@@ -243,6 +243,12 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
 
     var onZoomChanged: ((Float) -> Unit)? = null
 
+    // Sub-pixel accumulators so small per-frame scroll deltas aren't lost to toInt() truncation.
+    private var rvPanScrollAccum = 0f
+    private var rvScaleScrollAccum = 0f
+    // Reference to the running double-tap animator so it can be cancelled on new touch.
+    private var currentAnimator: ValueAnimator? = null
+
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -254,7 +260,15 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 val realFactor = newScale / currentScale
                 if (realFactor == 1f) return true
                 currentTransX = detector.focusX - (detector.focusX - currentTransX) * realFactor
-                currentTransY = detector.focusY - (detector.focusY - currentTransY) * realFactor
+                // Vertical focal point: scroll the RecyclerView so the content point under
+                // the pinch centre stays at the same screen position as the scale changes.
+                // Formula: content_y_focal stays fixed ⟹ delta = focusY*(1/S_old - 1/S_new).
+                rvScaleScrollAccum += detector.focusY * (1f / currentScale - 1f / newScale)
+                val toScrollScale = rvScaleScrollAccum.roundToInt()
+                if (toScrollScale != 0) {
+                    (getChildAt(0) as? RecyclerView)?.scrollBy(0, toScrollScale)
+                    rvScaleScrollAccum -= toScrollScale
+                }
                 currentScale = newScale
                 clampTransX()
                 applyTransform()
@@ -296,7 +310,16 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 if (currentScale > 1.0f) {
                     lastScrollTime = System.currentTimeMillis()
                     currentTransX -= distanceX
-                    currentTransY -= distanceY
+                    // Vertical pan: drive RecyclerView scroll directly so it renders the
+                    // correct pages.  distanceY is in screen pixels; divide by scale to get
+                    // content pixels.  Accumulate the fractional remainder so no pixels
+                    // are silently dropped on slow drags.
+                    rvPanScrollAccum += distanceY / currentScale
+                    val toScrollPan = rvPanScrollAccum.roundToInt()
+                    if (toScrollPan != 0) {
+                        (getChildAt(0) as? RecyclerView)?.scrollBy(0, toScrollPan)
+                        rvPanScrollAccum -= toScrollPan
+                    }
                     clampTransX()
                     applyTransform()
                     return true
@@ -320,6 +343,15 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
     // the detectors exactly once.  onInterceptTouchEvent and onTouchEvent then
     // only read the resulting state — they never feed events to the detectors again.
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            // Reset per-gesture accumulators and cancel any running zoom animation.
+            // Cancelling fires onAnimationEnd synchronously, which commits any pending
+            // translationY into the RecyclerView's scroll offset before new gesture
+            // callbacks run.
+            rvPanScrollAccum = 0f
+            rvScaleScrollAccum = 0f
+            currentAnimator?.cancel()
+        }
         scaleDetector.onTouchEvent(ev)
         gestureDetector.onTouchEvent(ev)
         when (ev.actionMasked) {
@@ -356,8 +388,9 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         val startTransX = currentTransX
         val startTransY = currentTransY
 
+        currentAnimator?.cancel()
         enableHardwareLayer()
-        ValueAnimator.ofFloat(0f, 1f).apply {
+        currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 250
             interpolator = DecelerateInterpolator()
             addUpdateListener { anim ->
@@ -369,16 +402,33 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    currentAnimator = null
+                    commitTranslationY()
                     disableHardwareLayer()
                     onZoomChanged?.invoke(targetScale)
+                }
+                override fun onAnimationCancel(animation: Animator) {
+                    currentAnimator = null
+                    commitTranslationY()
                 }
             })
             start()
         }
     }
 
+    // Converts any pending translationY into an equivalent RecyclerView scroll so that
+    // live panning after an animation uses only rv.scrollBy (no stale translationY).
+    private fun commitTranslationY() {
+        if (currentTransY == 0f) return
+        val rv = getChildAt(0) as? RecyclerView
+        if (rv != null) {
+            rv.scrollBy(0, (-currentTransY / currentScale).roundToInt())
+        }
+        currentTransY = 0f
+        applyTransform()
+    }
+
     private fun clampTransX() {
-        // When fully zoomed out, snap both axes to zero so no stale offset remains.
         if (currentScale <= minScale) {
             currentTransX = 0f
             currentTransY = 0f
@@ -387,9 +437,9 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         // Horizontal: left/right page edges must stay within screen bounds.
         val minTransX = width.toFloat() * (1f - currentScale)
         currentTransX = currentTransX.coerceIn(minTransX, 0f)
-        // Vertical: top/bottom page edges must stay within screen bounds.
-        val minTransY = height.toFloat() * (1f - currentScale)
-        currentTransY = currentTransY.coerceIn(minTransY, 0f)
+        // Vertical: RecyclerView naturally clamps its own scroll to [0, maxScrollY],
+        // which corresponds to first-page top and last-page bottom.  No translationY
+        // clamping is needed here.
     }
 
     private fun applyTransform() {
