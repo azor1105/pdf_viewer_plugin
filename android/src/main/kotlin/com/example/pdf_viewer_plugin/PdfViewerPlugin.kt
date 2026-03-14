@@ -37,6 +37,7 @@ import androidx.recyclerview.widget.RecyclerView
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
@@ -62,7 +63,7 @@ class PdfViewerPlugin : FlutterPlugin, ActivityAware {
         pluginBinding?.let {
             it.platformViewRegistry.registerViewFactory(
                 "pdf_viewer_plugin_view",
-                PdfViewFactory(activity!!, it.flutterAssets)
+                PdfViewFactory(activity!!, it.flutterAssets, it.binaryMessenger)
             )
         }
     }
@@ -76,12 +77,13 @@ class PdfViewerPlugin : FlutterPlugin, ActivityAware {
 
 class PdfViewFactory(
     private val activity: Activity,
-    private val flutterAssets: FlutterPlugin.FlutterAssets
+    private val flutterAssets: FlutterPlugin.FlutterAssets,
+    private val binaryMessenger: io.flutter.plugin.common.BinaryMessenger
 ) : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
 
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
         val params = args as? Map<*, *>
-        return PdfPlatformView(context, activity, flutterAssets, params)
+        return PdfPlatformView(context, activity, flutterAssets, params, viewId, binaryMessenger)
     }
 }
 
@@ -89,32 +91,35 @@ class PdfPlatformView(
     private val context: Context,
     private val activity: Activity,
     private val flutterAssets: FlutterPlugin.FlutterAssets,
-    private val params: Map<*, *>?
+    private val params: Map<*, *>?,
+    viewId: Int,
+    binaryMessenger: io.flutter.plugin.common.BinaryMessenger
 ) : PlatformView {
 
     private val container = FrameLayout(context)
     private var pdfRendererAdapter: FallbackPdfRendererAdapter? = null
+    private val channel = MethodChannel(binaryMessenger, "pdf_viewer_plugin_view/$viewId")
 
     init {
         val assetPath = params?.get("assetPath") as? String
         val filePath = params?.get("filePath") as? String
         val isHorizontal = (params?.get("scrollDirection") as? String) == "horizontal"
+        val initialPage = (params?.get("initialPage") as? Int) ?: 0
 
         if (assetPath != null) {
             val flutterAssetKey = flutterAssets.getAssetFilePathBySubpath(assetPath)
             val cacheFile = copyAssetToCache(context, flutterAssetKey)
-            loadPdf(cacheFile, isHorizontal)
+            loadPdf(cacheFile, isHorizontal, initialPage)
         } else if (filePath != null) {
-            loadPdf(File(filePath), isHorizontal)
+            loadPdf(File(filePath), isHorizontal, initialPage)
         }
     }
 
-    private fun loadPdf(file: File, isHorizontal: Boolean) {
-        if (isPdfViewerFragmentSupported()) {
-            loadWithPdfViewerFragment(file, isHorizontal)
-        } else {
-            loadWithFallbackRenderer(file, isHorizontal)
-        }
+    private fun loadPdf(file: File, isHorizontal: Boolean, initialPage: Int) {
+        // Always use the fallback renderer — it supports initialPage, onPageChanged,
+        // and horizontal scrolling. The Jetpack PdfViewerFragment doesn't expose
+        // page-scroll or page-change APIs, so we bypass it entirely for now.
+        loadWithFallbackRenderer(file, isHorizontal, initialPage)
     }
 
     private fun isPdfViewerFragmentSupported(): Boolean {
@@ -156,7 +161,7 @@ class PdfPlatformView(
         pdfFragment.documentUri = uri
     }
 
-    private fun loadWithFallbackRenderer(file: File, isHorizontal: Boolean) {
+    private fun loadWithFallbackRenderer(file: File, isHorizontal: Boolean, initialPage: Int = 0) {
         val screenWidth = context.resources.displayMetrics.widthPixels
         val adapter = FallbackPdfRendererAdapter(context, file, screenWidth, isHorizontal)
         pdfRendererAdapter = adapter
@@ -197,6 +202,43 @@ class PdfPlatformView(
         val dp = context.resources.displayMetrics.density
         val circleSize = (50 * dp).toInt()
 
+        // Shared scroll listener: notifies Flutter and updates the scrubber
+        var lastReportedPage = initialPage
+        fun makeScrollListener(scrubber: PageScrubberView) = object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                val lm = rv.layoutManager as? LinearLayoutManager ?: return
+                val page = lm.findFirstVisibleItemPosition()
+                scrubber.updatePage(page)
+                if (page != lastReportedPage) {
+                    lastReportedPage = page
+                    Handler(Looper.getMainLooper()).post {
+                        channel.invokeMethod("onPageChanged", page)
+                    }
+                }
+            }
+        }
+
+        // The container is NOT attached to a window at this point — Flutter embeds
+        // it later. We wait for the attachment event, then double-post to ensure
+        // both the measure/layout pass AND the first draw have completed before
+        // scrolling. This is the only reliable approach for Flutter PlatformViews.
+        if (initialPage > 0) {
+            container.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) {
+                    container.removeOnAttachStateChangeListener(this)
+                    // First post: after the current layout pass
+                    recyclerView.post {
+                        // Second post: after the first draw frame
+                        recyclerView.post {
+                            (recyclerView.layoutManager as? LinearLayoutManager)
+                                ?.scrollToPositionWithOffset(initialPage, 0)
+                        }
+                    }
+                }
+                override fun onViewDetachedFromWindow(v: View) {}
+            })
+        }
+
         if (isHorizontal) {
             // Horizontal scrubber: 150dp wide × 100dp tall, bottom of screen.
             // Extra height gives the pill drawn above the circle enough room to breathe.
@@ -209,13 +251,7 @@ class PdfPlatformView(
                 marginStart = (8 * dp).toInt()
             }
             container.addView(scrubber, scrubberParams)
-
-            recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                    val lm = rv.layoutManager as? LinearLayoutManager ?: return
-                    scrubber.updatePage(lm.findFirstVisibleItemPosition())
-                }
-            })
+            recyclerView.addOnScrollListener(makeScrollListener(scrubber))
         } else {
             // Vertical scrubber: right-aligned, vertically adaptive
             val scrubberWidth = (150 * dp).toInt()
@@ -226,13 +262,7 @@ class PdfPlatformView(
                 topMargin = (8 * dp).toInt()
             }
             container.addView(scrubber, scrubberParams)
-
-            recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                    val lm = rv.layoutManager as? LinearLayoutManager ?: return
-                    scrubber.updatePage(lm.findFirstVisibleItemPosition())
-                }
-            })
+            recyclerView.addOnScrollListener(makeScrollListener(scrubber))
         }
     }
 

@@ -13,9 +13,15 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(title: const Text('PDF Viewer Example')),
-        body: const PdfViewer(
-          assetPath: 'assets/pdf/sample.pdf',
-          scrollDirection: ScrollDirection.horizontal,
+        body: SafeArea(
+          child: PdfViewer(
+            assetPath: 'assets/pdf/sample.pdf',
+            scrollDirection: ScrollDirection.vertical,
+            initialPage: 10,
+            onPageChanged: (value){
+              debugPrint('Page changed: $value');
+            },
+          ),
         ),
       ),
     );

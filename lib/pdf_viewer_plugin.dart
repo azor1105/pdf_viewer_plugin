@@ -15,7 +15,7 @@ enum ScrollDirection { vertical, horizontal }
 /// On older devices, falls back to the framework PdfRenderer.
 ///
 /// Provide either [assetPath] (a Flutter asset) or [filePath] (absolute path).
-class PdfViewer extends StatelessWidget {
+class PdfViewer extends StatefulWidget {
   /// Path to a Flutter asset, e.g. "assets/pdf/document.pdf".
   final String? assetPath;
 
@@ -25,15 +25,30 @@ class PdfViewer extends StatelessWidget {
   /// The scroll direction for the PDF pages (default: vertical).
   final ScrollDirection scrollDirection;
 
+  /// The page index (0-based) to open the document at.
+  final int initialPage;
+
+  /// Called whenever the visible page changes. The value is the 0-based index.
+  final ValueChanged<int>? onPageChanged;
+
   const PdfViewer({
     super.key,
     this.assetPath,
     this.filePath,
     this.scrollDirection = ScrollDirection.horizontal,
+    this.initialPage = 0,
+    this.onPageChanged,
   }) : assert(
          assetPath != null || filePath != null,
          'Either assetPath or filePath must be provided',
        );
+
+  @override
+  State<PdfViewer> createState() => _PdfViewerState();
+}
+
+class _PdfViewerState extends State<PdfViewer> {
+  late final MethodChannel _channel;
 
   @override
   Widget build(BuildContext context) {
@@ -44,18 +59,20 @@ class PdfViewer extends StatelessWidget {
     }
 
     final Map<String, dynamic> creationParams = {};
-    if (assetPath != null) {
-      creationParams['assetPath'] = assetPath;
-    } else if (filePath != null) {
-      creationParams['filePath'] = filePath;
+    if (widget.assetPath != null) {
+      creationParams['assetPath'] = widget.assetPath;
+    } else if (widget.filePath != null) {
+      creationParams['filePath'] = widget.filePath;
     }
-    creationParams['scrollDirection'] = scrollDirection.name;
+    creationParams['scrollDirection'] = widget.scrollDirection.name;
+    creationParams['initialPage'] = widget.initialPage;
 
     return AndroidView(
       viewType: 'pdf_viewer_plugin_view',
       layoutDirection: TextDirection.ltr,
       creationParams: creationParams,
       creationParamsCodec: const StandardMessageCodec(),
+      onPlatformViewCreated: _onPlatformViewCreated,
       gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
         Factory<VerticalDragGestureRecognizer>(
           () => VerticalDragGestureRecognizer(),
@@ -67,6 +84,15 @@ class PdfViewer extends StatelessWidget {
         Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
       },
     );
+  }
+
+  void _onPlatformViewCreated(int id) {
+    _channel = MethodChannel('pdf_viewer_plugin_view/$id');
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onPageChanged') {
+        widget.onPageChanged?.call(call.arguments as int);
+      }
+    });
   }
 }
 // TODO:
