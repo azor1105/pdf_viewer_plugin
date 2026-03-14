@@ -16,8 +16,8 @@ class MyApp extends StatelessWidget {
         body: SafeArea(
           child: PdfViewer(
             assetPath: 'assets/pdf/sample.pdf',
-            scrollDirection: ScrollDirection.vertical,
-            initialPage: 10,
+            scrollDirection: ScrollDirection.horizontal,
+            initialPage: 100,
             onPageChanged: (value){
               debugPrint('Page changed: $value');
             },

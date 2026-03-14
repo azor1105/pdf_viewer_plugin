@@ -609,7 +609,7 @@ class FallbackPdfRendererAdapter(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(Color.rgb(245, 245, 245))
+            setBackgroundColor(Color.WHITE)
         }
         return PageViewHolder(imageView)
     }
@@ -636,7 +636,7 @@ class FallbackPdfRendererAdapter(
             holder.imageView.setImageBitmap(placeholder)
         } else {
             holder.imageView.setImageBitmap(null)
-            holder.imageView.setBackgroundColor(Color.rgb(245, 245, 245))
+            holder.imageView.setBackgroundColor(Color.WHITE)
         }
 
         val tag = key
