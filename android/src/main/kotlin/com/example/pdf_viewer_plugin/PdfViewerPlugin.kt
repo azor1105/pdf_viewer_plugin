@@ -98,21 +98,22 @@ class PdfPlatformView(
     init {
         val assetPath = params?.get("assetPath") as? String
         val filePath = params?.get("filePath") as? String
+        val isHorizontal = (params?.get("scrollDirection") as? String) == "horizontal"
 
         if (assetPath != null) {
             val flutterAssetKey = flutterAssets.getAssetFilePathBySubpath(assetPath)
             val cacheFile = copyAssetToCache(context, flutterAssetKey)
-            loadPdf(cacheFile)
+            loadPdf(cacheFile, isHorizontal)
         } else if (filePath != null) {
-            loadPdf(File(filePath))
+            loadPdf(File(filePath), isHorizontal)
         }
     }
 
-    private fun loadPdf(file: File) {
+    private fun loadPdf(file: File, isHorizontal: Boolean) {
         if (isPdfViewerFragmentSupported()) {
-            loadWithPdfViewerFragment(file)
+            loadWithPdfViewerFragment(file, isHorizontal)
         } else {
-            loadWithFallbackRenderer(file)
+            loadWithFallbackRenderer(file, isHorizontal)
         }
     }
 
@@ -125,9 +126,9 @@ class PdfPlatformView(
     }
 
     @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
-    private fun loadWithPdfViewerFragment(file: File) {
+    private fun loadWithPdfViewerFragment(file: File, isHorizontal: Boolean) {
         val appCompatActivity = activity as? AppCompatActivity ?: run {
-            loadWithFallbackRenderer(file)
+            loadWithFallbackRenderer(file, isHorizontal)
             return
         }
 
@@ -155,9 +156,9 @@ class PdfPlatformView(
         pdfFragment.documentUri = uri
     }
 
-    private fun loadWithFallbackRenderer(file: File) {
+    private fun loadWithFallbackRenderer(file: File, isHorizontal: Boolean) {
         val screenWidth = context.resources.displayMetrics.widthPixels
-        val adapter = FallbackPdfRendererAdapter(file, screenWidth)
+        val adapter = FallbackPdfRendererAdapter(context, file, screenWidth, isHorizontal)
         pdfRendererAdapter = adapter
 
         val recyclerView = RecyclerView(context).apply {
@@ -165,7 +166,11 @@ class PdfPlatformView(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
-            layoutManager = LinearLayoutManager(context)
+            layoutManager = LinearLayoutManager(
+                context,
+                if (isHorizontal) LinearLayoutManager.HORIZONTAL else LinearLayoutManager.VERTICAL,
+                false
+            )
             setHasFixedSize(true)
             setItemViewCacheSize(6)
             overScrollMode = RecyclerView.OVER_SCROLL_NEVER
@@ -173,7 +178,11 @@ class PdfPlatformView(
             this.adapter = adapter
         }
 
-        val zoomLayout = ZoomableLayout(context).apply {
+        if (isHorizontal) {
+            androidx.recyclerview.widget.PagerSnapHelper().attachToRecyclerView(recyclerView)
+        }
+
+        val zoomLayout = ZoomableLayout(context, isHorizontal).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -185,26 +194,46 @@ class PdfPlatformView(
         zoomLayout.addView(recyclerView)
         container.addView(zoomLayout)
 
-        // Page scrubber overlay — sits on top of zoomLayout, right-aligned, vertically adaptive
-        val scrubber = PageScrubberView(context, recyclerView, adapter.pageCount)
         val dp = context.resources.displayMetrics.density
         val circleSize = (50 * dp).toInt()
-        // Width is wide enough to draw the label pill to the left of the circle
-        val scrubberWidth = (150 * dp).toInt()
-        val scrubberParams = FrameLayout.LayoutParams(scrubberWidth, circleSize).apply {
-            gravity = Gravity.TOP or Gravity.END
-            marginEnd = (8 * dp).toInt()
-            topMargin = (8 * dp).toInt()
-        }
-        container.addView(scrubber, scrubberParams)
 
-        // Keep scrubber page label in sync when the user scrolls normally
-        recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                val lm = rv.layoutManager as? LinearLayoutManager ?: return
-                scrubber.updatePage(lm.findFirstVisibleItemPosition())
+        if (isHorizontal) {
+            // Horizontal scrubber: 150dp wide × 100dp tall, bottom of screen.
+            // Extra height gives the pill drawn above the circle enough room to breathe.
+            val scrubberW = (150 * dp).toInt()
+            val scrubberH = (100 * dp).toInt()
+            val scrubber = PageScrubberView(context, recyclerView, adapter.pageCount, isHorizontal)
+            val scrubberParams = FrameLayout.LayoutParams(scrubberW, scrubberH).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                bottomMargin = (8 * dp).toInt()
+                marginStart = (8 * dp).toInt()
             }
-        })
+            container.addView(scrubber, scrubberParams)
+
+            recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                    val lm = rv.layoutManager as? LinearLayoutManager ?: return
+                    scrubber.updatePage(lm.findFirstVisibleItemPosition())
+                }
+            })
+        } else {
+            // Vertical scrubber: right-aligned, vertically adaptive
+            val scrubberWidth = (150 * dp).toInt()
+            val scrubber = PageScrubberView(context, recyclerView, adapter.pageCount, isHorizontal)
+            val scrubberParams = FrameLayout.LayoutParams(scrubberWidth, circleSize).apply {
+                gravity = Gravity.TOP or Gravity.END
+                marginEnd = (8 * dp).toInt()
+                topMargin = (8 * dp).toInt()
+            }
+            container.addView(scrubber, scrubberParams)
+
+            recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                    val lm = rv.layoutManager as? LinearLayoutManager ?: return
+                    scrubber.updatePage(lm.findFirstVisibleItemPosition())
+                }
+            })
+        }
     }
 
     private fun copyAssetToCache(context: Context, assetKey: String): File {
@@ -227,7 +256,7 @@ class PdfPlatformView(
     }
 }
 
-class ZoomableLayout(context: Context) : FrameLayout(context) {
+class ZoomableLayout(context: Context, private val isHorizontal: Boolean = false) : FrameLayout(context) {
 
     private val minScale = 1.0f
     private val maxScale = 5.0f
@@ -260,17 +289,22 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
                 val realFactor = newScale / currentScale
                 if (realFactor == 1f) return true
                 currentTransX = detector.focusX - (detector.focusX - currentTransX) * realFactor
-                // Vertical focal point: scroll the RecyclerView so the content point under
-                // the pinch centre stays at the same screen position as the scale changes.
-                // Formula: content_y_focal stays fixed ⟹ delta = focusY*(1/S_old - 1/S_new).
-                rvScaleScrollAccum += detector.focusY * (1f / currentScale - 1f / newScale)
-                val toScrollScale = rvScaleScrollAccum.roundToInt()
-                if (toScrollScale != 0) {
-                    (getChildAt(0) as? RecyclerView)?.scrollBy(0, toScrollScale)
-                    rvScaleScrollAccum -= toScrollScale
+                if (isHorizontal) {
+                    // In horizontal mode, keep the vertical focal point via pure translation.
+                    currentTransY = detector.focusY - (detector.focusY - currentTransY) * realFactor
+                } else {
+                    // Vertical focal point: scroll the RecyclerView so the content point under
+                    // the pinch centre stays at the same screen position as the scale changes.
+                    // Formula: content_y_focal stays fixed ⟹ delta = focusY*(1/S_old - 1/S_new).
+                    rvScaleScrollAccum += detector.focusY * (1f / currentScale - 1f / newScale)
+                    val toScrollScale = rvScaleScrollAccum.roundToInt()
+                    if (toScrollScale != 0) {
+                        (getChildAt(0) as? RecyclerView)?.scrollBy(0, toScrollScale)
+                        rvScaleScrollAccum -= toScrollScale
+                    }
                 }
                 currentScale = newScale
-                clampTransX()
+                clampTrans()
                 applyTransform()
                 return true
             }
@@ -309,18 +343,24 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
             ): Boolean {
                 if (currentScale > 1.0f) {
                     lastScrollTime = System.currentTimeMillis()
-                    currentTransX -= distanceX
-                    // Vertical pan: drive RecyclerView scroll directly so it renders the
-                    // correct pages.  distanceY is in screen pixels; divide by scale to get
-                    // content pixels.  Accumulate the fractional remainder so no pixels
-                    // are silently dropped on slow drags.
-                    rvPanScrollAccum += distanceY / currentScale
-                    val toScrollPan = rvPanScrollAccum.roundToInt()
-                    if (toScrollPan != 0) {
-                        (getChildAt(0) as? RecyclerView)?.scrollBy(0, toScrollPan)
-                        rvPanScrollAccum -= toScrollPan
+                    if (isHorizontal) {
+                        // Horizontal mode: pure translation for both axes when zoomed.
+                        currentTransX -= distanceX
+                        currentTransY -= distanceY
+                    } else {
+                        currentTransX -= distanceX
+                        // Vertical pan: drive RecyclerView scroll directly so it renders the
+                        // correct pages.  distanceY is in screen pixels; divide by scale to get
+                        // content pixels.  Accumulate the fractional remainder so no pixels
+                        // are silently dropped on slow drags.
+                        rvPanScrollAccum += distanceY / currentScale
+                        val toScrollPan = rvPanScrollAccum.roundToInt()
+                        if (toScrollPan != 0) {
+                            (getChildAt(0) as? RecyclerView)?.scrollBy(0, toScrollPan)
+                            rvPanScrollAccum -= toScrollPan
+                        }
                     }
-                    clampTransX()
+                    clampTrans()
                     applyTransform()
                     return true
                 }
@@ -418,8 +458,9 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
 
     // Converts any pending translationY into an equivalent RecyclerView scroll so that
     // live panning after an animation uses only rv.scrollBy (no stale translationY).
+    // In horizontal mode translationY is kept as pure translation — no commit needed.
     private fun commitTranslationY() {
-        if (currentTransY == 0f) return
+        if (isHorizontal || currentTransY == 0f) return
         val rv = getChildAt(0) as? RecyclerView
         if (rv != null) {
             rv.scrollBy(0, (-currentTransY / currentScale).roundToInt())
@@ -428,7 +469,7 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         applyTransform()
     }
 
-    private fun clampTransX() {
+    private fun clampTrans() {
         if (currentScale <= minScale) {
             currentTransX = 0f
             currentTransY = 0f
@@ -437,9 +478,13 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
         // Horizontal: left/right page edges must stay within screen bounds.
         val minTransX = width.toFloat() * (1f - currentScale)
         currentTransX = currentTransX.coerceIn(minTransX, 0f)
-        // Vertical: RecyclerView naturally clamps its own scroll to [0, maxScrollY],
-        // which corresponds to first-page top and last-page bottom.  No translationY
-        // clamping is needed here.
+        if (isHorizontal) {
+            // In horizontal mode, vertical panning is also a pure translation.
+            val minTransY = height.toFloat() * (1f - currentScale)
+            currentTransY = currentTransY.coerceIn(minTransY, 0f)
+        }
+        // In vertical mode, RecyclerView naturally clamps its scroll to [0, maxScrollY]
+        // so no translationY clamping is needed.
     }
 
     private fun applyTransform() {
@@ -453,7 +498,12 @@ class ZoomableLayout(context: Context) : FrameLayout(context) {
     }
 }
 
-class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
+class FallbackPdfRendererAdapter(
+    private val context: Context,
+    file: File,
+    private val screenWidth: Int,
+    private val isHorizontal: Boolean = false
+) :
     RecyclerView.Adapter<FallbackPdfRendererAdapter.PageViewHolder>() {
 
     private val fileDescriptor: ParcelFileDescriptor =
@@ -461,6 +511,8 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     private val renderer: PdfRenderer = PdfRenderer(fileDescriptor)
     private val renderExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val screenHeight: Int by lazy { context.resources.displayMetrics.heightPixels }
 
     // Track current render zoom so bitmaps are rendered at matching resolution
     private var renderZoom = 1.0f
@@ -523,19 +575,23 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageViewHolder {
         val imageView = ImageView(parent.context).apply {
             layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                if (isHorizontal) screenWidth else ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
             )
             scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.rgb(245, 245, 245))
         }
         return PageViewHolder(imageView)
     }
 
     override fun onBindViewHolder(holder: PageViewHolder, position: Int) {
-        holder.imageView.layoutParams = holder.imageView.layoutParams.apply {
-            width = ViewGroup.LayoutParams.MATCH_PARENT
-            height = scaledHeight(position)
+        if (!isHorizontal) {
+            holder.imageView.layoutParams = holder.imageView.layoutParams.apply {
+                width = ViewGroup.LayoutParams.MATCH_PARENT
+                height = scaledHeight(position)
+            }
         }
+        // Horizontal: items keep MATCH_PARENT height; FIT_CENTER centres the bitmap.
 
         val key = cacheKey(position, renderZoom)
         val cached = bitmapCache.get(key)
@@ -550,7 +606,7 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
             holder.imageView.setImageBitmap(placeholder)
         } else {
             holder.imageView.setImageBitmap(null)
-            holder.imageView.setBackgroundColor(Color.WHITE)
+            holder.imageView.setBackgroundColor(Color.rgb(245, 245, 245))
         }
 
         val tag = key
@@ -583,7 +639,11 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
         if (position < 0 || position >= renderer.pageCount) return null
         val page = renderer.openPage(position)
         val info = pageInfoList[position]
-        val baseScale = screenWidth.toFloat() / info.width
+        val baseScale = if (isHorizontal) {
+            minOf(screenWidth.toFloat() / info.width, screenHeight.toFloat() / info.height)
+        } else {
+            screenWidth.toFloat() / info.width
+        }
         val renderScale = baseScale * zoom
         val width = (info.width * renderScale).toInt()
         val height = (info.height * renderScale).toInt()
@@ -606,20 +666,26 @@ class FallbackPdfRendererAdapter(file: File, private val screenWidth: Int) :
 }
 
 /**
- * A 50×50dp circular handle on the left edge of the PDF viewer.
- * Drag it up/down to scroll through pages; it shows "current / total" while active.
+ * A circular scrubber handle for the PDF viewer.
+ *
+ * Vertical mode   — 50×50dp circle pinned to the right edge; drag up/down to jump pages.
+ * Horizontal mode — square view with circle centred; drag left/right to jump pages.
+ *                   Label pill is drawn ABOVE the circle so it has room to expand.
  */
 class PageScrubberView(
     context: Context,
     private val recyclerView: RecyclerView,
-    private val totalPages: Int
+    private val totalPages: Int,
+    private val isHorizontal: Boolean = false
 ) : View(context) {
 
     private val dp = resources.displayMetrics.density
     private val circleR = 25 * dp
-    // Circle is flush to the right edge of this view; label is drawn to its left
-    private val circleCx get() = width - circleR
-    private val circleCy get() = height / 2f
+
+    // In horizontal mode: circle is bottom-anchored so the pill above it has room.
+    // In vertical mode:   circle is flush to the right edge, vertically centred.
+    private val circleCx get() = if (isHorizontal) width / 2f else width - circleR
+    private val circleCy get() = if (isHorizontal) height - circleR else height / 2f
 
     private var currentPage = 0
     private var isDragging = false
@@ -650,29 +716,34 @@ class PageScrubberView(
         style = Paint.Style.STROKE
     }
 
-    // Called by the scroll listener to keep the position in sync during normal scrolling
     fun updatePage(page: Int) {
         if (currentPage == page) return
         currentPage = page
-        repositionVertically()
+        reposition()
         invalidate()
     }
 
-    // Reposition the scrubber vertically based on current page ratio
-    private fun repositionVertically() {
+    private fun reposition() {
         val parent = parent as? View ?: return
-        val parentH = parent.height.takeIf { it > 0 } ?: return
-        val viewH = height.takeIf { it > 0 } ?: return
         val marginDp = (8 * dp).toInt()
-        val travelRange = (parentH - viewH - marginDp * 2).toFloat().coerceAtLeast(0f)
-        val ratio = if (totalPages <= 1) 0f else currentPage.toFloat() / (totalPages - 1)
-        translationY = ratio * travelRange
+        if (isHorizontal) {
+            val parentW = parent.width.takeIf { it > 0 } ?: return
+            val viewW = width.takeIf { it > 0 } ?: return
+            val travelRange = (parentW - viewW - marginDp * 2).toFloat().coerceAtLeast(0f)
+            val ratio = if (totalPages <= 1) 0f else currentPage.toFloat() / (totalPages - 1)
+            translationX = ratio * travelRange
+        } else {
+            val parentH = parent.height.takeIf { it > 0 } ?: return
+            val viewH = height.takeIf { it > 0 } ?: return
+            val travelRange = (parentH - viewH - marginDp * 2).toFloat().coerceAtLeast(0f)
+            val ratio = if (totalPages <= 1) 0f else currentPage.toFloat() / (totalPages - 1)
+            translationY = ratio * travelRange
+        }
     }
 
-    // Recalculate position when the view is laid out for the first time
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
-        repositionVertically()
+        reposition()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -680,37 +751,59 @@ class PageScrubberView(
         val cy = circleCy
 
         if (isDragging) {
-            // Draw label pill to the LEFT of the circle
             val label = "${currentPage + 1} / $totalPages"
             val labelPadH = 14 * dp
             val labelPadV = 10 * dp
             val labelW = textPaint.measureText(label) + labelPadH * 2
             val labelH = textPaint.textSize + labelPadV * 2
-            val pillRight = cx - circleR - 10 * dp
-            val pillLeft = pillRight - labelW
-            val pillTop = cy - labelH / 2f
-            val pillBottom = cy + labelH / 2f
-            canvas.drawRoundRect(RectF(pillLeft, pillTop, pillRight, pillBottom), labelH / 2f, labelH / 2f, labelBgPaint)
-            val textY = cy - (textPaint.ascent() + textPaint.descent()) / 2f
-            canvas.drawText(label, pillLeft + labelW / 2f, textY, textPaint)
+
+            if (isHorizontal) {
+                // Pill drawn ABOVE the circle — centred on cx, space guaranteed by square view
+                val pillBottom = cy - circleR - 10 * dp
+                val pillTop = pillBottom - labelH
+                val pillLeft = cx - labelW / 2f
+                val pillRight = cx + labelW / 2f
+                canvas.drawRoundRect(RectF(pillLeft, pillTop, pillRight, pillBottom), labelH / 2f, labelH / 2f, labelBgPaint)
+                val textY = (pillTop + pillBottom) / 2f - (textPaint.ascent() + textPaint.descent()) / 2f
+                canvas.drawText(label, cx, textY, textPaint)
+            } else {
+                // Pill drawn to the LEFT of the circle
+                val pillRight = cx - circleR - 10 * dp
+                val pillLeft = pillRight - labelW
+                val pillTop = cy - labelH / 2f
+                val pillBottom = cy + labelH / 2f
+                canvas.drawRoundRect(RectF(pillLeft, pillTop, pillRight, pillBottom), labelH / 2f, labelH / 2f, labelBgPaint)
+                val textY = cy - (textPaint.ascent() + textPaint.descent()) / 2f
+                canvas.drawText(label, pillLeft + labelW / 2f, textY, textPaint)
+            }
         }
 
         // Circle background
         canvas.drawCircle(cx, cy, circleR, circlePaint)
 
-        // Up arrow
         val aw = 10 * dp
-        val upTipY = cy - 8 * dp
-        canvas.drawLine(cx - aw / 2f, upTipY + 6 * dp, cx, upTipY, arrowPaint)
-        canvas.drawLine(cx, upTipY, cx + aw / 2f, upTipY + 6 * dp, arrowPaint)
-        // Down arrow
-        val downTipY = cy + 8 * dp
-        canvas.drawLine(cx - aw / 2f, downTipY - 6 * dp, cx, downTipY, arrowPaint)
-        canvas.drawLine(cx, downTipY, cx + aw / 2f, downTipY - 6 * dp, arrowPaint)
+        if (isHorizontal) {
+            // Left arrow
+            val leftTipX = cx - 8 * dp
+            canvas.drawLine(leftTipX + 6 * dp, cy - aw / 2f, leftTipX, cy, arrowPaint)
+            canvas.drawLine(leftTipX, cy, leftTipX + 6 * dp, cy + aw / 2f, arrowPaint)
+            // Right arrow
+            val rightTipX = cx + 8 * dp
+            canvas.drawLine(rightTipX - 6 * dp, cy - aw / 2f, rightTipX, cy, arrowPaint)
+            canvas.drawLine(rightTipX, cy, rightTipX - 6 * dp, cy + aw / 2f, arrowPaint)
+        } else {
+            // Up arrow
+            val upTipY = cy - 8 * dp
+            canvas.drawLine(cx - aw / 2f, upTipY + 6 * dp, cx, upTipY, arrowPaint)
+            canvas.drawLine(cx, upTipY, cx + aw / 2f, upTipY + 6 * dp, arrowPaint)
+            // Down arrow
+            val downTipY = cy + 8 * dp
+            canvas.drawLine(cx - aw / 2f, downTipY - 6 * dp, cx, downTipY, arrowPaint)
+            canvas.drawLine(cx, downTipY, cx + aw / 2f, downTipY - 6 * dp, arrowPaint)
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        // Touch is only active inside the circle
         val dx = event.x - circleCx
         val dy = event.y - circleCy
         val inCircle = dx * dx + dy * dy <= circleR * circleR
@@ -728,14 +821,20 @@ class PageScrubberView(
                 val parentView = parent as? View ?: return true
                 val parentLoc = IntArray(2)
                 parentView.getLocationOnScreen(parentLoc)
-                val relY = event.rawY - parentLoc[1]
-                val fraction = (relY / parentView.height).coerceIn(0f, 1f)
-                val targetPage = (fraction * (totalPages - 1)).roundToInt().coerceIn(0, totalPages - 1)
+                val targetPage = if (isHorizontal) {
+                    val relX = event.rawX - parentLoc[0]
+                    val fraction = (relX / parentView.width).coerceIn(0f, 1f)
+                    (fraction * (totalPages - 1)).roundToInt().coerceIn(0, totalPages - 1)
+                } else {
+                    val relY = event.rawY - parentLoc[1]
+                    val fraction = (relY / parentView.height).coerceIn(0f, 1f)
+                    (fraction * (totalPages - 1)).roundToInt().coerceIn(0, totalPages - 1)
+                }
                 if (targetPage != currentPage) {
                     currentPage = targetPage
                     (recyclerView.layoutManager as? LinearLayoutManager)
                         ?.scrollToPositionWithOffset(targetPage, 0)
-                    repositionVertically()
+                    reposition()
                     invalidate()
                 }
                 return true

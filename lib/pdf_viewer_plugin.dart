@@ -5,6 +5,9 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+/// The direction in which the PDF pages scroll.
+enum ScrollDirection { vertical, horizontal }
+
 /// A widget that displays a PDF document using native Android PDF APIs.
 ///
 /// On API 31+ with SDK extension >= 13, uses the Jetpack PdfViewerFragment
@@ -19,11 +22,18 @@ class PdfViewer extends StatelessWidget {
   /// Absolute file system path, e.g. from a file picker.
   final String? filePath;
 
-  const PdfViewer({super.key, this.assetPath, this.filePath})
-    : assert(
-        assetPath != null || filePath != null,
-        'Either assetPath or filePath must be provided',
-      );
+  /// The scroll direction for the PDF pages (default: vertical).
+  final ScrollDirection scrollDirection;
+
+  const PdfViewer({
+    super.key,
+    this.assetPath,
+    this.filePath,
+    this.scrollDirection = ScrollDirection.horizontal,
+  }) : assert(
+         assetPath != null || filePath != null,
+         'Either assetPath or filePath must be provided',
+       );
 
   @override
   Widget build(BuildContext context) {
@@ -39,6 +49,7 @@ class PdfViewer extends StatelessWidget {
     } else if (filePath != null) {
       creationParams['filePath'] = filePath;
     }
+    creationParams['scrollDirection'] = scrollDirection.name;
 
     return AndroidView(
       viewType: 'pdf_viewer_plugin_view',
@@ -48,6 +59,9 @@ class PdfViewer extends StatelessWidget {
       gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
         Factory<VerticalDragGestureRecognizer>(
           () => VerticalDragGestureRecognizer(),
+        ),
+        Factory<HorizontalDragGestureRecognizer>(
+          () => HorizontalDragGestureRecognizer(),
         ),
         Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
         Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),

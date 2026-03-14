@@ -13,7 +13,10 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(title: const Text('PDF Viewer Example')),
-        body: const PdfViewer(assetPath: 'assets/pdf/sample.pdf'),
+        body: const PdfViewer(
+          assetPath: 'assets/pdf/sample.pdf',
+          scrollDirection: ScrollDirection.horizontal,
+        ),
       ),
     );
   }
