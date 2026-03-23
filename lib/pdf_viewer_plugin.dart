@@ -13,7 +13,7 @@ enum ScrollDirection { vertical, horizontal }
 /// change the scroll direction at runtime without rebuilding the widget tree.
 ///
 /// ```dart
-/// final _controller = PdfViewerController();
+/// final _controller = PdfController();
 ///
 /// @override
 /// void dispose() {
@@ -27,7 +27,7 @@ enum ScrollDirection { vertical, horizontal }
 /// // Change scroll direction at runtime:
 /// _controller.setScrollDirection(ScrollDirection.horizontal);
 /// ```
-class PdfViewerController extends ChangeNotifier {
+class PdfController extends ChangeNotifier {
   MethodChannel? _channel;
   int _currentPage = 0;
   ScrollDirection _scrollDirection = ScrollDirection.horizontal;
@@ -89,7 +89,7 @@ class PdfViewer extends StatefulWidget {
   final ValueChanged<int>? onPageChanged;
 
   /// Optional controller for programmatic access to the viewer.
-  final PdfViewerController? controller;
+  final PdfController? controller;
 
   /// Opens a PDF bundled as a Flutter asset.
   ///
