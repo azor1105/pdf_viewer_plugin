@@ -13,8 +13,6 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.pdf.PdfRenderer
-import android.net.Uri
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
@@ -29,9 +27,6 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
-import androidx.annotation.RequiresExtension
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -100,26 +95,48 @@ class PdfPlatformView(
     private var pdfRendererAdapter: FallbackPdfRendererAdapter? = null
     private val channel = MethodChannel(binaryMessenger, "pdf_viewer_plugin_view/$viewId")
 
+    @Volatile private var isDisposed = false
     private var currentFile: File? = null
     private var currentIsHorizontal: Boolean = false
     private var currentPage: Int = 0
 
     init {
-        val assetPath = params?.get("assetPath") as? String
-        val filePath = params?.get("filePath") as? String
         currentIsHorizontal = (params?.get("scrollDirection") as? String) == "horizontal"
         val initialPage = (params?.get("initialPage") as? Int) ?: 0
         currentPage = initialPage
 
-        if (assetPath != null) {
-            val flutterAssetKey = flutterAssets.getAssetFilePathBySubpath(assetPath)
-            val cacheFile = copyAssetToCache(context, flutterAssetKey)
-            currentFile = cacheFile
-            loadPdf(cacheFile, currentIsHorizontal, initialPage)
-        } else if (filePath != null) {
-            val file = File(filePath)
-            currentFile = file
-            loadPdf(file, currentIsHorizontal, initialPage)
+        val assetPath = params?.get("assetPath") as? String
+        val filePath = params?.get("filePath") as? String
+
+        // All file I/O runs on a background thread so the platform view is
+        // returned to Flutter immediately — navigation is no longer blocked by
+        // asset copying or PdfRenderer initialisation.
+        val executor = Executors.newSingleThreadExecutor()
+        executor.execute {
+            try {
+                val file: File = if (assetPath != null) {
+                    val key = flutterAssets.getAssetFilePathBySubpath(assetPath)
+                    copyAssetToCache(context, key)
+                } else {
+                    File(filePath!!)
+                }
+                currentFile = file
+                val screenWidth = context.resources.displayMetrics.widthPixels
+                // Heavy sync work: open PdfRenderer + read every page's dimensions
+                val adapter = FallbackPdfRendererAdapter(context, file, screenWidth, currentIsHorizontal)
+                Handler(Looper.getMainLooper()).post {
+                    if (isDisposed) { adapter.close(); return@post }
+                    pdfRendererAdapter = adapter
+                    buildViewHierarchy(adapter, currentIsHorizontal, initialPage)
+                    channel.invokeMethod("onDocumentLoaded", adapter.pageCount)
+                }
+            } catch (e: Exception) {
+                Handler(Looper.getMainLooper()).post {
+                    if (!isDisposed) channel.invokeMethod("onDocumentError", e.message)
+                }
+            } finally {
+                executor.shutdown()
+            }
         }
 
         channel.setMethodCallHandler { call, result ->
@@ -141,60 +158,24 @@ class PdfPlatformView(
         pdfRendererAdapter?.close()
         pdfRendererAdapter = null
         container.removeAllViews()
-        loadWithFallbackRenderer(file, isHorizontal, currentPage)
-    }
-
-    private fun loadPdf(file: File, isHorizontal: Boolean, initialPage: Int) {
-        // Always use the fallback renderer — it supports initialPage, onPageChanged,
-        // and horizontal scrolling. The Jetpack PdfViewerFragment doesn't expose
-        // page-scroll or page-change APIs, so we bypass it entirely for now.
-        loadWithFallbackRenderer(file, isHorizontal, initialPage)
-    }
-
-    private fun isPdfViewerFragmentSupported(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            android.os.ext.SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13
-        } else {
-            false
+        val savedPage = currentPage
+        val executor = Executors.newSingleThreadExecutor()
+        executor.execute {
+            try {
+                val screenWidth = context.resources.displayMetrics.widthPixels
+                val adapter = FallbackPdfRendererAdapter(context, file, screenWidth, isHorizontal)
+                Handler(Looper.getMainLooper()).post {
+                    if (isDisposed) { adapter.close(); return@post }
+                    pdfRendererAdapter = adapter
+                    buildViewHierarchy(adapter, isHorizontal, savedPage)
+                }
+            } catch (e: Exception) { /* ignore direction-change errors */ } finally {
+                executor.shutdown()
+            }
         }
     }
 
-    @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
-    private fun loadWithPdfViewerFragment(file: File, isHorizontal: Boolean) {
-        val appCompatActivity = activity as? AppCompatActivity ?: run {
-            loadWithFallbackRenderer(file, isHorizontal)
-            return
-        }
-
-        val fragmentContainer = FrameLayout(context).apply {
-            id = View.generateViewId()
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        container.addView(fragmentContainer)
-
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.pdf_viewer_plugin.provider",
-            file
-        )
-
-        val pdfFragment = androidx.pdf.viewer.fragment.PdfViewerFragment()
-        appCompatActivity.supportFragmentManager
-            .beginTransaction()
-            .replace(fragmentContainer.id, pdfFragment, "pdf_viewer_$fragmentContainer.id")
-            .commitAllowingStateLoss()
-        appCompatActivity.supportFragmentManager.executePendingTransactions()
-        pdfFragment.documentUri = uri
-    }
-
-    private fun loadWithFallbackRenderer(file: File, isHorizontal: Boolean, initialPage: Int = 0) {
-        val screenWidth = context.resources.displayMetrics.widthPixels
-        val adapter = FallbackPdfRendererAdapter(context, file, screenWidth, isHorizontal)
-        pdfRendererAdapter = adapter
-
+    private fun buildViewHierarchy(adapter: FallbackPdfRendererAdapter, isHorizontal: Boolean, initialPage: Int) {
         val recyclerView = RecyclerView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -311,6 +292,7 @@ class PdfPlatformView(
     override fun getView(): View = container
 
     override fun dispose() {
+        isDisposed = true
         channel.setMethodCallHandler(null)
         pdfRendererAdapter?.close()
         pdfRendererAdapter = null

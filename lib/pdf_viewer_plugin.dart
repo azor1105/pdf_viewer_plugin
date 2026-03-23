@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart' show CircularProgressIndicator;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -88,6 +89,19 @@ class PdfViewer extends StatefulWidget {
   /// Called whenever the visible page changes. The value is the 0-based index.
   final ValueChanged<int>? onPageChanged;
 
+  /// Called once when the PDF document has finished loading.
+  ///
+  /// Use this to react to the document being ready, e.g. to update UI outside
+  /// the viewer. The viewer itself already shows a built-in loading indicator
+  /// (see [loadingWidget]) until the document is loaded.
+  final VoidCallback? onDocumentLoaded;
+
+  /// Widget shown over the viewer while the document is loading.
+  ///
+  /// Defaults to a centred [CircularProgressIndicator] on a white background.
+  /// Pass `const SizedBox.shrink()` to disable the built-in loader entirely.
+  final Widget? loadingWidget;
+
   /// Optional controller for programmatic access to the viewer.
   final PdfController? controller;
 
@@ -102,6 +116,8 @@ class PdfViewer extends StatefulWidget {
     this.scrollDirection = ScrollDirection.horizontal,
     this.initialPage = 0,
     this.onPageChanged,
+    this.onDocumentLoaded,
+    this.loadingWidget,
   }) : filePath = null;
 
   /// Opens a PDF from an absolute path on the device's storage.
@@ -115,6 +131,8 @@ class PdfViewer extends StatefulWidget {
     this.scrollDirection = ScrollDirection.horizontal,
     this.initialPage = 0,
     this.onPageChanged,
+    this.onDocumentLoaded,
+    this.loadingWidget,
   }) : assetPath = null;
 
   /// Low-level constructor — prefer [PdfViewer.asset] or [PdfViewer.file].
@@ -126,6 +144,8 @@ class PdfViewer extends StatefulWidget {
     this.scrollDirection = ScrollDirection.horizontal,
     this.initialPage = 0,
     this.onPageChanged,
+    this.onDocumentLoaded,
+    this.loadingWidget,
   }) : assert(
          assetPath != null || filePath != null,
          'Either assetPath or filePath must be provided',
@@ -137,6 +157,7 @@ class PdfViewer extends StatefulWidget {
 
 class _PdfViewerState extends State<PdfViewer> {
   MethodChannel? _channel;
+  bool _isLoaded = false;
 
   @override
   void didUpdateWidget(PdfViewer oldWidget) {
@@ -172,22 +193,34 @@ class _PdfViewerState extends State<PdfViewer> {
     creationParams['scrollDirection'] = widget.scrollDirection.name;
     creationParams['initialPage'] = widget.initialPage;
 
-    return AndroidView(
-      viewType: 'pdf_viewer_plugin_view',
-      layoutDirection: TextDirection.ltr,
-      creationParams: creationParams,
-      creationParamsCodec: const StandardMessageCodec(),
-      onPlatformViewCreated: _onPlatformViewCreated,
-      gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-        Factory<VerticalDragGestureRecognizer>(
-          () => VerticalDragGestureRecognizer(),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        AndroidView(
+          viewType: 'pdf_viewer_plugin_view',
+          layoutDirection: TextDirection.ltr,
+          creationParams: creationParams,
+          creationParamsCodec: const StandardMessageCodec(),
+          onPlatformViewCreated: _onPlatformViewCreated,
+          gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+            Factory<VerticalDragGestureRecognizer>(
+              () => VerticalDragGestureRecognizer(),
+            ),
+            Factory<HorizontalDragGestureRecognizer>(
+              () => HorizontalDragGestureRecognizer(),
+            ),
+            Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
+            Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
+          },
         ),
-        Factory<HorizontalDragGestureRecognizer>(
-          () => HorizontalDragGestureRecognizer(),
-        ),
-        Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
-        Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
-      },
+        if (!_isLoaded)
+          ColoredBox(
+            color: const Color(0xFFFFFFFF),
+            child: Center(
+              child: widget.loadingWidget ?? const CircularProgressIndicator(),
+            ),
+          ),
+      ],
     );
   }
 
@@ -200,6 +233,11 @@ class _PdfViewerState extends State<PdfViewer> {
         final page = call.arguments as int;
         widget.onPageChanged?.call(page);
         widget.controller?._updatePage(page);
+      } else if (call.method == 'onDocumentLoaded') {
+        if (mounted && !_isLoaded) {
+          setState(() => _isLoaded = true);
+          widget.onDocumentLoaded?.call();
+        }
       }
     });
   }
