@@ -202,13 +202,15 @@ class PdfPlatformView(
         val dp = context.resources.displayMetrics.density
         val circleSize = (50 * dp).toInt()
 
-        // Shared scroll listener: notifies Flutter and updates the scrubber
+        // Shared scroll listener: notifies Flutter, updates the scrubber position,
+        // and shows the page-count pill while scrolling.
         var lastReportedPage = initialPage
         fun makeScrollListener(scrubber: PageScrubberView) = object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 val lm = rv.layoutManager as? LinearLayoutManager ?: return
                 val page = lm.findFirstVisibleItemPosition()
                 scrubber.updatePage(page)
+                scrubber.notifyScrolling()
                 if (page != lastReportedPage) {
                     lastReportedPage = page
                     Handler(Looper.getMainLooper()).post {
@@ -719,10 +721,21 @@ class PageScrubberView(
 
     private var currentPage = 0
     private var isDragging = false
+    // True whenever the label pill should be visible (drag OR normal swipe scroll)
+    private var showLabel = false
 
     private val hideHandler = Handler(Looper.getMainLooper())
     private val hideRunnable = Runnable {
+        showLabel = false
         isDragging = false
+        invalidate()
+    }
+
+    /** Called by the RecyclerView scroll listener on every scroll event. */
+    fun notifyScrolling() {
+        showLabel = true
+        hideHandler.removeCallbacks(hideRunnable)
+        hideHandler.postDelayed(hideRunnable, 1000L)
         invalidate()
     }
 
@@ -780,7 +793,7 @@ class PageScrubberView(
         val cx = circleCx
         val cy = circleCy
 
-        if (isDragging) {
+        if (isDragging || showLabel) {
             val label = "${currentPage + 1} / $totalPages"
             val labelPadH = 14 * dp
             val labelPadV = 10 * dp
@@ -842,6 +855,7 @@ class PageScrubberView(
             MotionEvent.ACTION_DOWN -> {
                 if (!inCircle) return false
                 isDragging = true
+                showLabel = true
                 hideHandler.removeCallbacks(hideRunnable)
                 invalidate()
                 return true
@@ -870,7 +884,8 @@ class PageScrubberView(
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                hideHandler.postDelayed(hideRunnable, 1200)
+                hideHandler.removeCallbacks(hideRunnable)
+                hideHandler.postDelayed(hideRunnable, 1000L)
                 return true
             }
         }
