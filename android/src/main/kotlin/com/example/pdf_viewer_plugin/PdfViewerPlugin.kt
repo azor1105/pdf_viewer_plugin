@@ -99,6 +99,7 @@ class PdfPlatformView(
     private var currentFile: File? = null
     private var currentIsHorizontal: Boolean = false
     private var currentPage: Int = 0
+    private var currentRecyclerView: RecyclerView? = null
 
     init {
         currentIsHorizontal = (params?.get("scrollDirection") as? String) == "horizontal"
@@ -149,6 +150,18 @@ class PdfPlatformView(
                     }
                     result.success(null)
                 }
+                "jumpToPage" -> {
+                    val page = (call.arguments as? Int) ?: 0
+                    currentPage = page
+                    val rv = currentRecyclerView
+                    if (rv != null) {
+                        rv.post {
+                            (rv.layoutManager as? LinearLayoutManager)
+                                ?.scrollToPositionWithOffset(page, 0)
+                        }
+                    }
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -157,6 +170,7 @@ class PdfPlatformView(
     private fun rebuildWithDirection(file: File, isHorizontal: Boolean) {
         pdfRendererAdapter?.close()
         pdfRendererAdapter = null
+        currentRecyclerView = null
         container.removeAllViews()
         val savedPage = currentPage
         val executor = Executors.newSingleThreadExecutor()
@@ -192,6 +206,7 @@ class PdfPlatformView(
             isNestedScrollingEnabled = false
             this.adapter = adapter
         }
+        currentRecyclerView = recyclerView
 
         if (isHorizontal) {
             androidx.recyclerview.widget.PagerSnapHelper().attachToRecyclerView(recyclerView)
@@ -229,25 +244,29 @@ class PdfPlatformView(
             }
         }
 
-        // The container is NOT attached to a window at this point — Flutter embeds
-        // it later. We wait for the attachment event, then double-post to ensure
-        // both the measure/layout pass AND the first draw have completed before
-        // scrolling. This is the only reliable approach for Flutter PlatformViews.
+        // Scroll to initialPage once layout is ready.
+        // After async loading the container is usually already attached, so we
+        // check first and skip straight to posting; otherwise we wait for attach.
         if (initialPage > 0) {
-            container.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(v: View) {
-                    container.removeOnAttachStateChangeListener(this)
-                    // First post: after the current layout pass
+            val doScroll: () -> Unit = {
+                recyclerView.post {
                     recyclerView.post {
-                        // Second post: after the first draw frame
-                        recyclerView.post {
-                            (recyclerView.layoutManager as? LinearLayoutManager)
-                                ?.scrollToPositionWithOffset(initialPage, 0)
-                        }
+                        (recyclerView.layoutManager as? LinearLayoutManager)
+                            ?.scrollToPositionWithOffset(initialPage, 0)
                     }
                 }
-                override fun onViewDetachedFromWindow(v: View) {}
-            })
+            }
+            if (container.isAttachedToWindow) {
+                doScroll()
+            } else {
+                container.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) {
+                        container.removeOnAttachStateChangeListener(this)
+                        doScroll()
+                    }
+                    override fun onViewDetachedFromWindow(v: View) {}
+                })
+            }
         }
 
         if (isHorizontal) {
@@ -294,6 +313,7 @@ class PdfPlatformView(
     override fun dispose() {
         isDisposed = true
         channel.setMethodCallHandler(null)
+        currentRecyclerView = null
         pdfRendererAdapter?.close()
         pdfRendererAdapter = null
     }

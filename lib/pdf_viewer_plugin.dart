@@ -48,6 +48,15 @@ class PdfController extends ChangeNotifier {
     await _channel?.invokeMethod('setScrollDirection', direction.name);
   }
 
+  /// Jumps to [page] (0-based) in the attached [PdfViewer].
+  ///
+  /// Has no effect if no viewer is currently attached.
+  Future<void> jumpToPage(int page) async {
+    _currentPage = page;
+    notifyListeners();
+    await _channel?.invokeMethod('jumpToPage', page);
+  }
+
   void _attach(MethodChannel channel, ScrollDirection initialDirection) {
     _channel = channel;
     _scrollDirection = initialDirection;
