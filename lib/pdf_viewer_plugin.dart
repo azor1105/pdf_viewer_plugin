@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -96,7 +95,7 @@ class _PdfViewerState extends State<PdfViewer> {
   }
 }
 // TODO:
-// 1. horizontal and vertical scroll support
+// 1. develop PDF viewer for iOS using PDFKit and add platform detection to show appropriate viewer on each platform
 // 2. support for text selection and copying to clipboard
 
 // LATER:
