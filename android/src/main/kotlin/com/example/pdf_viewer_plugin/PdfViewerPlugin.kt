@@ -100,19 +100,48 @@ class PdfPlatformView(
     private var pdfRendererAdapter: FallbackPdfRendererAdapter? = null
     private val channel = MethodChannel(binaryMessenger, "pdf_viewer_plugin_view/$viewId")
 
+    private var currentFile: File? = null
+    private var currentIsHorizontal: Boolean = false
+    private var currentPage: Int = 0
+
     init {
         val assetPath = params?.get("assetPath") as? String
         val filePath = params?.get("filePath") as? String
-        val isHorizontal = (params?.get("scrollDirection") as? String) == "horizontal"
+        currentIsHorizontal = (params?.get("scrollDirection") as? String) == "horizontal"
         val initialPage = (params?.get("initialPage") as? Int) ?: 0
+        currentPage = initialPage
 
         if (assetPath != null) {
             val flutterAssetKey = flutterAssets.getAssetFilePathBySubpath(assetPath)
             val cacheFile = copyAssetToCache(context, flutterAssetKey)
-            loadPdf(cacheFile, isHorizontal, initialPage)
+            currentFile = cacheFile
+            loadPdf(cacheFile, currentIsHorizontal, initialPage)
         } else if (filePath != null) {
-            loadPdf(File(filePath), isHorizontal, initialPage)
+            val file = File(filePath)
+            currentFile = file
+            loadPdf(file, currentIsHorizontal, initialPage)
         }
+
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "setScrollDirection" -> {
+                    val isHor = (call.arguments as? String) == "horizontal"
+                    if (isHor != currentIsHorizontal) {
+                        currentIsHorizontal = isHor
+                        currentFile?.let { rebuildWithDirection(it, isHor) }
+                    }
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun rebuildWithDirection(file: File, isHorizontal: Boolean) {
+        pdfRendererAdapter?.close()
+        pdfRendererAdapter = null
+        container.removeAllViews()
+        loadWithFallbackRenderer(file, isHorizontal, currentPage)
     }
 
     private fun loadPdf(file: File, isHorizontal: Boolean, initialPage: Int) {
@@ -204,15 +233,14 @@ class PdfPlatformView(
 
         // Shared scroll listener: notifies Flutter, updates the scrubber position,
         // and shows the page-count pill while scrolling.
-        var lastReportedPage = initialPage
         fun makeScrollListener(scrubber: PageScrubberView) = object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 val lm = rv.layoutManager as? LinearLayoutManager ?: return
                 val page = lm.findFirstVisibleItemPosition()
                 scrubber.updatePage(page)
                 scrubber.notifyScrolling()
-                if (page != lastReportedPage) {
-                    lastReportedPage = page
+                if (page != currentPage) {
+                    currentPage = page
                     Handler(Looper.getMainLooper()).post {
                         channel.invokeMethod("onPageChanged", page)
                     }
@@ -283,6 +311,7 @@ class PdfPlatformView(
     override fun getView(): View = container
 
     override fun dispose() {
+        channel.setMethodCallHandler(null)
         pdfRendererAdapter?.close()
         pdfRendererAdapter = null
     }

@@ -7,6 +7,62 @@ import 'package:flutter/widgets.dart';
 /// The direction in which the PDF pages scroll.
 enum ScrollDirection { vertical, horizontal }
 
+/// Controls a [PdfViewer] widget.
+///
+/// Attach a controller via [PdfViewer.controller] to read the current page and
+/// change the scroll direction at runtime without rebuilding the widget tree.
+///
+/// ```dart
+/// final _controller = PdfViewerController();
+///
+/// @override
+/// void dispose() {
+///   _controller.dispose();
+///   super.dispose();
+/// }
+///
+/// // Read current page (0-based):
+/// print(_controller.currentPage);
+///
+/// // Change scroll direction at runtime:
+/// _controller.setScrollDirection(ScrollDirection.horizontal);
+/// ```
+class PdfViewerController extends ChangeNotifier {
+  MethodChannel? _channel;
+  int _currentPage = 0;
+  ScrollDirection _scrollDirection = ScrollDirection.horizontal;
+
+  /// The current visible page index (0-based).
+  int get currentPage => _currentPage;
+
+  /// The current scroll direction of the attached viewer.
+  ScrollDirection get scrollDirection => _scrollDirection;
+
+  /// Changes the scroll direction of the attached [PdfViewer] at runtime.
+  ///
+  /// Has no effect if no viewer is currently attached.
+  Future<void> setScrollDirection(ScrollDirection direction) async {
+    _scrollDirection = direction;
+    notifyListeners();
+    await _channel?.invokeMethod('setScrollDirection', direction.name);
+  }
+
+  void _attach(MethodChannel channel, ScrollDirection initialDirection) {
+    _channel = channel;
+    _scrollDirection = initialDirection;
+  }
+
+  void _detach() {
+    _channel = null;
+  }
+
+  void _updatePage(int page) {
+    if (_currentPage == page) return;
+    _currentPage = page;
+    notifyListeners();
+  }
+}
+
 /// A widget that displays a PDF document using native Android PDF APIs.
 ///
 /// On API 31+ with SDK extension >= 13, uses the Jetpack PdfViewerFragment
@@ -32,6 +88,9 @@ class PdfViewer extends StatefulWidget {
   /// Called whenever the visible page changes. The value is the 0-based index.
   final ValueChanged<int>? onPageChanged;
 
+  /// Optional controller for programmatic access to the viewer.
+  final PdfViewerController? controller;
+
   /// Opens a PDF bundled as a Flutter asset.
   ///
   /// [assetPath] must be a path registered in `pubspec.yaml`, e.g.
@@ -39,6 +98,7 @@ class PdfViewer extends StatefulWidget {
   const PdfViewer.asset(
     String this.assetPath, {
     super.key,
+    this.controller,
     this.scrollDirection = ScrollDirection.horizontal,
     this.initialPage = 0,
     this.onPageChanged,
@@ -51,6 +111,7 @@ class PdfViewer extends StatefulWidget {
   const PdfViewer.file(
     String this.filePath, {
     super.key,
+    this.controller,
     this.scrollDirection = ScrollDirection.horizontal,
     this.initialPage = 0,
     this.onPageChanged,
@@ -61,6 +122,7 @@ class PdfViewer extends StatefulWidget {
     super.key,
     this.assetPath,
     this.filePath,
+    this.controller,
     this.scrollDirection = ScrollDirection.horizontal,
     this.initialPage = 0,
     this.onPageChanged,
@@ -74,7 +136,24 @@ class PdfViewer extends StatefulWidget {
 }
 
 class _PdfViewerState extends State<PdfViewer> {
-  late final MethodChannel _channel;
+  MethodChannel? _channel;
+
+  @override
+  void didUpdateWidget(PdfViewer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Hot-reload / setState fix: when scrollDirection changes on the widget,
+    // push the new value to the native side via the method channel.
+    if (oldWidget.scrollDirection != widget.scrollDirection) {
+      _channel?.invokeMethod('setScrollDirection', widget.scrollDirection.name);
+      widget.controller?._scrollDirection = widget.scrollDirection;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller?._detach();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -113,10 +192,14 @@ class _PdfViewerState extends State<PdfViewer> {
   }
 
   void _onPlatformViewCreated(int id) {
-    _channel = MethodChannel('pdf_viewer_plugin_view/$id');
-    _channel.setMethodCallHandler((call) async {
+    final channel = MethodChannel('pdf_viewer_plugin_view/$id');
+    _channel = channel;
+    widget.controller?._attach(channel, widget.scrollDirection);
+    channel.setMethodCallHandler((call) async {
       if (call.method == 'onPageChanged') {
-        widget.onPageChanged?.call(call.arguments as int);
+        final page = call.arguments as int;
+        widget.onPageChanged?.call(page);
+        widget.controller?._updatePage(page);
       }
     });
   }
