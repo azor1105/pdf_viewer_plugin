@@ -13,7 +13,9 @@ enum ScrollDirection { vertical, horizontal }
 /// with full search, zoom, text selection and annotation support.
 /// On older devices, falls back to the framework PdfRenderer.
 ///
-/// Provide either [assetPath] (a Flutter asset) or [filePath] (absolute path).
+/// Use the named constructors to be explicit about the source:
+/// - [PdfViewer.asset] — Flutter asset bundled with the app.
+/// - [PdfViewer.file] — Absolute path on the device's storage.
 class PdfViewer extends StatefulWidget {
   /// Path to a Flutter asset, e.g. "assets/pdf/document.pdf".
   final String? assetPath;
@@ -21,7 +23,7 @@ class PdfViewer extends StatefulWidget {
   /// Absolute file system path, e.g. from a file picker.
   final String? filePath;
 
-  /// The scroll direction for the PDF pages (default: vertical).
+  /// The scroll direction for the PDF pages (default: horizontal).
   final ScrollDirection scrollDirection;
 
   /// The page index (0-based) to open the document at.
@@ -30,6 +32,31 @@ class PdfViewer extends StatefulWidget {
   /// Called whenever the visible page changes. The value is the 0-based index.
   final ValueChanged<int>? onPageChanged;
 
+  /// Opens a PDF bundled as a Flutter asset.
+  ///
+  /// [assetPath] must be a path registered in `pubspec.yaml`, e.g.
+  /// `"assets/pdf/document.pdf"`.
+  const PdfViewer.asset(
+    String this.assetPath, {
+    super.key,
+    this.scrollDirection = ScrollDirection.horizontal,
+    this.initialPage = 0,
+    this.onPageChanged,
+  }) : filePath = null;
+
+  /// Opens a PDF from an absolute path on the device's storage.
+  ///
+  /// [filePath] must be a full file-system path, e.g.
+  /// `"/data/user/0/com.example.app/app_flutter/document.pdf"`.
+  const PdfViewer.file(
+    String this.filePath, {
+    super.key,
+    this.scrollDirection = ScrollDirection.horizontal,
+    this.initialPage = 0,
+    this.onPageChanged,
+  }) : assetPath = null;
+
+  /// Low-level constructor — prefer [PdfViewer.asset] or [PdfViewer.file].
   const PdfViewer({
     super.key,
     this.assetPath,

@@ -14,10 +14,10 @@ class MyApp extends StatelessWidget {
       home: Scaffold(
         appBar: AppBar(title: const Text('PDF Viewer Example')),
         body: SafeArea(
-          child: PdfViewer(
-            assetPath: 'assets/pdf/sample.pdf',
+          child: PdfViewer.asset(
+            'assets/pdf/sample.pdf',
             scrollDirection: ScrollDirection.vertical,
-            onPageChanged: (value){
+            onPageChanged: (value) {
               debugPrint('Page changed: $value');
             },
           ),
