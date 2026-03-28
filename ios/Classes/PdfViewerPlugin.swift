@@ -139,12 +139,26 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
                 } else if let filePath = filePath {
                     url = URL(fileURLWithPath: filePath)
                 } else {
-                    return
-                }
-                guard let document = PDFDocument(url: url) else {
                     DispatchQueue.main.async {
                         self.channel.invokeMethod("onDocumentError",
-                                                  arguments: "Failed to open PDF document")
+                                                  arguments: "No file path or asset path provided")
+                    }
+                    return
+                }
+                // First attempt: open the path as-is.
+                // Second attempt: if that fails AND the path contains a
+                // sandbox UUID (common after an iOS reinstall or update
+                // that rotates the app-container UUID), try to remap the
+                // relative portion under the *current* sandbox directories.
+                var document = PDFDocument(url: url)
+                if document == nil, let filePath = filePath,
+                   let remapped = self.remapSandboxPath(filePath) {
+                    document = PDFDocument(url: remapped)
+                }
+                guard let document = document else {
+                    DispatchQueue.main.async {
+                        self.channel.invokeMethod("onDocumentError",
+                                                  arguments: "Failed to open PDF document – file not found at the given path. On iOS the app-sandbox path changes on every reinstall; store only the filename and resolve it at runtime via the app's Documents directory.")
                     }
                     return
                 }
@@ -158,6 +172,64 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
                 }
             }
         }
+    }
+
+    /// Attempts to remap an iOS sandbox file path whose container UUID has
+    /// become stale (e.g. after an app reinstall or update).
+    ///
+    /// iOS path structure:
+    ///   `.../Containers/Data/Application/<UUID>/Documents/file.pdf`
+    ///
+    /// This method extracts the well-known subdirectory and filename that
+    /// follow the UUID, then resolves them relative to the *current* sandbox
+    /// container so the file can still be opened.
+    ///
+    /// Returns `nil` when the path is not a recognisable iOS sandbox path or
+    /// when the remapped file does not exist on disk.
+    private func remapSandboxPath(_ originalPath: String) -> URL? {
+        // Match the UUID segment that iOS inserts for every app container.
+        guard let regex = try? NSRegularExpression(
+            pattern: #"/Containers/Data/Application/[0-9A-Fa-f\-]+/(.+)"#
+        ) else { return nil }
+
+        let ns = originalPath as NSString
+        guard let match = regex.firstMatch(
+            in: originalPath,
+            range: NSRange(location: 0, length: ns.length)
+        ) else { return nil }
+
+        // `relative` is everything after the UUID, e.g. "Documents/file.pdf"
+        let relativeRange = match.range(at: 1)
+        guard relativeRange.location != NSNotFound else { return nil }
+        let relative = ns.substring(with: relativeRange)
+
+        let fm = FileManager.default
+
+        // Map the leading well-known directory name to a FileManager search
+        // path so we always resolve against the *live* container.
+        let mapping: [(String, FileManager.SearchPathDirectory)] = [
+            ("Documents/", .documentDirectory),
+            ("Library/Caches/", .cachesDirectory),
+            ("Library/",  .libraryDirectory),
+        ]
+        for (prefix, searchDir) in mapping {
+            guard relative.hasPrefix(prefix) else { continue }
+            let suffix = String(relative.dropFirst(prefix.count))
+            guard let base = fm.urls(for: searchDir, in: .userDomainMask).first
+            else { continue }
+            let candidate = base.appendingPathComponent(suffix)
+            if fm.fileExists(atPath: candidate.path) { return candidate }
+        }
+
+        // Handle the tmp/ directory separately (not a search-path directory).
+        if relative.hasPrefix("tmp/") {
+            let suffix = String(relative.dropFirst(4))
+            let candidate = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent(suffix)
+            if fm.fileExists(atPath: candidate.path) { return candidate }
+        }
+
+        return nil
     }
 
     /// Resolves a Flutter asset path to a file URL in the app bundle.

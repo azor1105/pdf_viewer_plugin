@@ -104,6 +104,15 @@ class PdfViewer extends StatefulWidget {
   /// (see [loadingWidget]) until the document is loaded.
   final VoidCallback? onDocumentLoaded;
 
+  /// Called when the document fails to load, e.g. because the file no longer
+  /// exists at the given path (common after an app reinstall or update on iOS
+  /// where the sandbox container UUID changes).
+  ///
+  /// The [error] string contains a human-readable description of the failure.
+  /// The built-in loading indicator is dismissed automatically so the caller
+  /// can render an appropriate error state.
+  final ValueChanged<String>? onDocumentError;
+
   /// Widget shown over the viewer while the document is loading.
   ///
   /// Defaults to a centred [CircularProgressIndicator] on a white background.
@@ -125,6 +134,7 @@ class PdfViewer extends StatefulWidget {
     this.initialPage = 0,
     this.onPageChanged,
     this.onDocumentLoaded,
+    this.onDocumentError,
     this.loadingWidget,
   }) : filePath = null;
 
@@ -140,6 +150,7 @@ class PdfViewer extends StatefulWidget {
     this.initialPage = 0,
     this.onPageChanged,
     this.onDocumentLoaded,
+    this.onDocumentError,
     this.loadingWidget,
   }) : assetPath = null;
 
@@ -153,6 +164,7 @@ class PdfViewer extends StatefulWidget {
     this.initialPage = 0,
     this.onPageChanged,
     this.onDocumentLoaded,
+    this.onDocumentError,
     this.loadingWidget,
   }) : assert(
          assetPath != null || filePath != null,
@@ -270,6 +282,15 @@ class _PdfViewerState extends State<PdfViewer> {
           setState(() => _isLoaded = true);
           widget.onDocumentLoaded?.call();
         }
+      } else if (call.method == 'onDocumentError') {
+        // Dismiss the loading overlay so it does not spin forever when the
+        // file path is stale (e.g. after an iOS reinstall/update that changes
+        // the app-sandbox UUID).
+        if (mounted && !_isLoaded) {
+          setState(() => _isLoaded = true);
+        }
+        final error = call.arguments as String? ?? 'Unknown error';
+        widget.onDocumentError?.call(error);
       }
     });
   }
