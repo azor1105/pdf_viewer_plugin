@@ -121,7 +121,7 @@ class PdfViewer extends StatefulWidget {
     String this.assetPath, {
     super.key,
     this.controller,
-    this.scrollDirection = ScrollDirection.horizontal,
+    this.scrollDirection = ScrollDirection.vertical,
     this.initialPage = 0,
     this.onPageChanged,
     this.onDocumentLoaded,

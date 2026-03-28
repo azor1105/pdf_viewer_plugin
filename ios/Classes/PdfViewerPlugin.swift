@@ -62,6 +62,7 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
     private var pageCount: Int = 0
     private var currentPage: Int = 0
     private var isHorizontal: Bool = false
+    private var scrollObserver: NSKeyValueObservation?
 
     init(
         frame: CGRect,
@@ -99,6 +100,7 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        stopScrollObservation()
         channel.setMethodCallHandler(nil)
     }
 
@@ -205,9 +207,8 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
     private func setupPdfView(document: PDFDocument, initialPage: Int) {
         let pdf = PDFView(frame: container.bounds)
         pdf.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        pdf.autoScales          = true
-        pdf.maxScaleFactor      = 5.0
-        pdf.displaysPageBreaks  = true
+        pdf.maxScaleFactor   = 5.0
+        pdf.displaysPageBreaks = true
         if #available(iOS 16.0, *) {
             pdf.pageShadowsEnabled = true
         }
@@ -216,11 +217,6 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
 
         pdf.document = document
         pageCount = document.pageCount
-
-        if initialPage > 0, initialPage < document.pageCount,
-           let page = document.page(at: initialPage) {
-            pdf.go(to: page)
-        }
 
         // Insert behind the loading overlay so we can fade it out.
         container.insertSubview(pdf, at: 0)
@@ -234,6 +230,35 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
         )
 
         addScrubber()
+
+        // Force a synchronous layout pass so pdf.bounds is valid before we
+        // compute the fit-to-width scale, then jump to the initial page.
+        DispatchQueue.main.async { [weak self, weak pdf] in
+            guard let self = self, let pdf = pdf else { return }
+            // layoutIfNeeded gives the PDFView its real frame before we read
+            // pdf.bounds.width — without this the bounds can still be zero.
+            self.container.layoutIfNeeded()
+            if !self.isHorizontal {
+                self.fitToWidth(pdf)
+            }
+            if initialPage > 0 {
+                // One more run-loop turn lets the scale change commit its
+                // internal content-size recalculation before we scroll.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.jumpToPage(initialPage)
+                    // After a brief settle, force-sync the scrubber to the
+                    // actual page that PDFKit landed on (handles cases where
+                    // the notif-based updatePage guard short-circuits).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                        self?.syncScrubberToCurrentPage()
+                        self?.startScrollObservation()
+                    }
+                }
+            } else {
+                self.startScrollObservation()
+            }
+        }
+
         hideLoadingOverlay()
         channel.invokeMethod("onDocumentLoaded", arguments: pageCount)
     }
@@ -243,28 +268,22 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
         if isHorizontal {
             pdf.displayMode      = .singlePage
             pdf.displayDirection = .horizontal
+            pdf.autoScales       = true
             pdf.usePageViewController(true, withViewOptions: nil)
         } else {
             pdf.usePageViewController(false, withViewOptions: nil)
             pdf.displayMode      = .singlePageContinuous
             pdf.displayDirection = .vertical
+            // autoScales is unreliable in singlePageContinuous mode before the
+            // view has valid bounds. Scale is applied manually via fitToWidth.
+            pdf.autoScales       = false
         }
     }
 
     // MARK: - Page-change notification
 
     @objc private func handlePageChange() {
-        guard let pdf      = pdfView,
-              let page     = pdf.currentPage,
-              let document = pdf.document else { return }
-
-        let index = document.index(for: page)
-        scrubber?.notifyScrolling()
-
-        guard index != currentPage else { return }
-        currentPage = index
-        scrubber?.updatePage(index)
-        channel.invokeMethod("onPageChanged", arguments: index)
+        refreshCurrentPage()
     }
 
     // MARK: - Page navigation
@@ -274,16 +293,10 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
               let document = pdf.document,
               page >= 0, page < document.pageCount,
               let pdfPage  = document.page(at: page) else { return }
-
-        if isHorizontal {
-            pdf.go(to: pdfPage)
-        } else {
-            // Scroll to the top of the target page.
-            let bounds = pdfPage.bounds(for: pdf.displayBox)
-            let dest   = PDFDestination(page: pdfPage,
-                                        at: CGPoint(x: 0, y: bounds.height))
-            pdf.go(to: dest)
-        }
+        // pdf.go(to:PDFPage) is reliable for both horizontal paged mode and
+        // vertical continuous mode — it scrolls to make the page visible
+        // without needing PDFDestination coordinate arithmetic.
+        pdf.go(to: pdfPage)
     }
 
     // MARK: - Runtime direction change
@@ -293,16 +306,104 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
         guard let pdf = pdfView else { return }
 
         let savedPage = currentPage
+        stopScrollObservation()
         applyDisplayMode(to: pdf, isHorizontal: isHorizontal)
 
         scrubber?.removeFromSuperview()
         scrubber = nil
         addScrubber()
 
-        // Give the PDF view a frame to settle before jumping.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.jumpToPage(savedPage)
+        DispatchQueue.main.async { [weak self, weak pdf] in
+            guard let self = self, let pdf = pdf else { return }
+            self.container.layoutIfNeeded()
+            if !self.isHorizontal {
+                self.fitToWidth(pdf)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.jumpToPage(savedPage)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.syncScrubberToCurrentPage()
+                    self?.startScrollObservation()
+                }
+            }
         }
+    }
+
+    // MARK: - Scale helpers
+
+    /// Scales vertical-continuous mode so pages fill the view width exactly.
+    private func fitToWidth(_ pdf: PDFView) {
+        guard let page = pdf.document?.page(at: 0) else { return }
+        let pageWidth = page.bounds(for: pdf.displayBox).width
+        // Use the first non-zero width available. The Flutter engine may have
+        // not yet assigned the final frame when this is first called.
+        let viewWidth: CGFloat
+        if pdf.bounds.width > 0 {
+            viewWidth = pdf.bounds.width
+        } else if container.bounds.width > 0 {
+            viewWidth = container.bounds.width
+        } else {
+            viewWidth = UIScreen.main.bounds.width
+        }
+        guard pageWidth > 0 else { return }
+        let scale = viewWidth / pageWidth
+        pdf.minScaleFactor = scale * 0.5   // allow zooming out to half width
+        pdf.scaleFactor    = scale
+    }
+
+    // MARK: - Scroll observation (vertical mode only)
+
+    /// Observes the PDFView's internal UIScrollView so the scrubber updates
+    /// in real time while the user drags, rather than only on the discrete
+    /// PDFViewPageChanged notification.
+    private func startScrollObservation() {
+        guard !isHorizontal, let pdf = pdfView else { return }
+        let sv = findScrollView(in: pdf)
+        scrollObserver = sv?.observe(\.contentOffset, options: .new) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshCurrentPage() }
+        }
+    }
+
+    private func stopScrollObservation() {
+        scrollObserver?.invalidate()
+        scrollObserver = nil
+    }
+
+    /// Reads the current page from the PDFView and, if it changed, updates
+    /// the scrubber and fires the Flutter callback.
+    private func refreshCurrentPage() {
+        guard let pdf      = pdfView,
+              let page     = pdf.currentPage,
+              let document = pdf.document else { return }
+        let index = document.index(for: page)
+        scrubber?.notifyScrolling()
+        guard index != currentPage else { return }
+        currentPage = index
+        scrubber?.updatePage(index)
+        channel.invokeMethod("onPageChanged", arguments: index)
+    }
+
+    /// Finds the first UIScrollView in a PDFView's view hierarchy.
+    private func findScrollView(in view: UIView) -> UIScrollView? {
+        if let sv = view as? UIScrollView { return sv }
+        for sub in view.subviews {
+            if let found = findScrollView(in: sub) { return found }
+        }
+        return nil
+    }
+
+    /// Reads the true current page from PDFKit and forces the scrubber to
+    /// that position regardless of its cached `currentPage`. This is called
+    /// after an initial/direction-change jump to guarantee the handle is in
+    /// the right place even when `PDFViewPageChanged` didn't fire or the
+    /// superview had zero bounds during earlier `repositionAlongAxis` calls.
+    private func syncScrubberToCurrentPage() {
+        guard let pdf      = pdfView,
+              let page     = pdf.currentPage,
+              let document = pdf.document else { return }
+        let idx = document.index(for: page)
+        currentPage = idx
+        scrubber?.forceSetPage(idx)
     }
 
     // MARK: - Scrubber
@@ -310,7 +411,8 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
     private func addScrubber() {
         let s = PageScrubberView(
             isHorizontal: isHorizontal,
-            pageCount: pageCount
+            pageCount: pageCount,
+            initialPage: currentPage
         ) { [weak self] page in
             self?.jumpToPage(page)
         }
@@ -360,9 +462,10 @@ class PageScrubberView: UIView {
     private var showLabel: Bool   = false
     private var hideTimer: Timer?
 
-    init(isHorizontal: Bool, pageCount: Int, onPageSelected: @escaping (Int) -> Void) {
+    init(isHorizontal: Bool, pageCount: Int, initialPage: Int = 0, onPageSelected: @escaping (Int) -> Void) {
         self.isHorizontal   = isHorizontal
         self.totalPages      = pageCount
+        self.currentPage     = initialPage
         self.onPageSelected  = onPageSelected
         super.init(frame: .zero)
         backgroundColor        = .clear
@@ -406,15 +509,30 @@ class PageScrubberView: UIView {
         guard let sv = superview else { return }
         let margin: CGFloat = 8
 
+        // If the superview hasn't received its final frame from the Flutter
+        // engine yet (bounds == .zero), fall back to the screen bounds so the
+        // initial position is still painted correctly.
+        let svWidth  = sv.bounds.width  > 0 ? sv.bounds.width  : UIScreen.main.bounds.width
+        let svHeight = sv.bounds.height > 0 ? sv.bounds.height : UIScreen.main.bounds.height
+
         if isHorizontal {
-            let travel = max(0, sv.bounds.width  - bounds.width  - margin * 2)
+            let travel = max(0, svWidth  - bounds.width  - margin * 2)
             let ratio  = totalPages <= 1 ? 0.0 : CGFloat(currentPage) / CGFloat(totalPages - 1)
             transform  = CGAffineTransform(translationX: ratio * travel, y: 0)
         } else {
-            let travel = max(0, sv.bounds.height - bounds.height - margin * 2)
+            let travel = max(0, svHeight - bounds.height - margin * 2)
             let ratio  = totalPages <= 1 ? 0.0 : CGFloat(currentPage) / CGFloat(totalPages - 1)
             transform  = CGAffineTransform(translationX: 0, y: ratio * travel)
         }
+    }
+
+    /// Force-updates the displayed page and repositions the scrubber handle.
+    /// Unlike `updatePage(_:)`, this bypasses the same-page guard — use it
+    /// when the view bounds have just become valid after a layout pass.
+    func forceSetPage(_ page: Int) {
+        currentPage = page
+        repositionAlongAxis()
+        setNeedsDisplay()
     }
 
     override func layoutSubviews() {
