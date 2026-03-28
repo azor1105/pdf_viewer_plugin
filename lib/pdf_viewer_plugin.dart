@@ -73,11 +73,10 @@ class PdfController extends ChangeNotifier {
   }
 }
 
-/// A widget that displays a PDF document using native Android PDF APIs.
+/// A widget that displays a PDF document using native platform PDF APIs.
 ///
-/// On API 31+ with SDK extension >= 13, uses the Jetpack PdfViewerFragment
-/// with full search, zoom, text selection and annotation support.
-/// On older devices, falls back to the framework PdfRenderer.
+/// On Android, uses the framework PdfRenderer for rendering.
+/// On iOS, uses Apple PDFKit (PDFView) available since iOS 12.
 ///
 /// Use the named constructors to be explicit about the source:
 /// - [PdfViewer.asset] — Flutter asset bundled with the app.
@@ -187,9 +186,9 @@ class _PdfViewerState extends State<PdfViewer> {
 
   @override
   Widget build(BuildContext context) {
-    if (!Platform.isAndroid) {
+    if (!Platform.isAndroid && !Platform.isIOS) {
       return const Center(
-        child: Text('PDF viewer is only supported on Android'),
+        child: Text('PDF viewer is not supported on this platform'),
       );
     }
 
@@ -202,26 +201,50 @@ class _PdfViewerState extends State<PdfViewer> {
     creationParams['scrollDirection'] = widget.scrollDirection.name;
     creationParams['initialPage'] = widget.initialPage;
 
+    final Widget platformView;
+    if (Platform.isAndroid) {
+      platformView = AndroidView(
+        viewType: 'pdf_viewer_plugin_view',
+        layoutDirection: TextDirection.ltr,
+        creationParams: creationParams,
+        creationParamsCodec: const StandardMessageCodec(),
+        onPlatformViewCreated: _onPlatformViewCreated,
+        gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+          Factory<VerticalDragGestureRecognizer>(
+            () => VerticalDragGestureRecognizer(),
+          ),
+          Factory<HorizontalDragGestureRecognizer>(
+            () => HorizontalDragGestureRecognizer(),
+          ),
+          Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
+          Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
+        },
+      );
+    } else {
+      // iOS
+      platformView = UiKitView(
+        viewType: 'pdf_viewer_plugin_view',
+        layoutDirection: TextDirection.ltr,
+        creationParams: creationParams,
+        creationParamsCodec: const StandardMessageCodec(),
+        onPlatformViewCreated: _onPlatformViewCreated,
+        gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+          Factory<VerticalDragGestureRecognizer>(
+            () => VerticalDragGestureRecognizer(),
+          ),
+          Factory<HorizontalDragGestureRecognizer>(
+            () => HorizontalDragGestureRecognizer(),
+          ),
+          Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
+          Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
+        },
+      );
+    }
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        AndroidView(
-          viewType: 'pdf_viewer_plugin_view',
-          layoutDirection: TextDirection.ltr,
-          creationParams: creationParams,
-          creationParamsCodec: const StandardMessageCodec(),
-          onPlatformViewCreated: _onPlatformViewCreated,
-          gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-            Factory<VerticalDragGestureRecognizer>(
-              () => VerticalDragGestureRecognizer(),
-            ),
-            Factory<HorizontalDragGestureRecognizer>(
-              () => HorizontalDragGestureRecognizer(),
-            ),
-            Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
-            Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
-          },
-        ),
+        platformView,
         if (!_isLoaded)
           ColoredBox(
             color: const Color(0xFFFFFFFF),

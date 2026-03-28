@@ -37,6 +37,8 @@ flutter:
       android:
         package: com.example.pdf_viewer_plugin
         pluginClass: PdfViewerPlugin
+      ios:
+        pluginClass: PdfViewerPlugin
 
   # To add assets to your plugin package, add an assets section, like this:
   # assets:
