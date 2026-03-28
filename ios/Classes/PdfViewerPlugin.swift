@@ -207,10 +207,16 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
     private func setupPdfView(document: PDFDocument, initialPage: Int) {
         let pdf = PDFView(frame: container.bounds)
         pdf.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        pdf.maxScaleFactor   = 5.0
-        pdf.displaysPageBreaks = true
+        // Keep the max zoom reasonable – a higher cap forces PDFKit to
+        // maintain proportionally larger tile caches in GPU memory, which
+        // causes sustained thermal load with large documents.
+        pdf.maxScaleFactor   = 3.0
+        // Page breaks and shadows add extra GPU composite passes on every
+        // frame; skip them in single-page horizontal mode where they have
+        // no visual effect anyway.
+        pdf.displaysPageBreaks = !isHorizontal
         if #available(iOS 16.0, *) {
-            pdf.pageShadowsEnabled = true
+            pdf.pageShadowsEnabled = false
         }
 
         pdf.backgroundColor = .white
@@ -385,7 +391,11 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
               let page     = pdf.currentPage,
               let document = pdf.document else { return }
         let index = document.index(for: page)
-        scrubber?.notifyScrolling()
+        // notifyScrolling triggers a Core Graphics redraw; only call it
+        // in vertical mode where it reflects real continuous scrolling.
+        // In horizontal paged mode discrete page-change events drive the
+        // scrubber through updatePage instead.
+        if !isHorizontal { scrubber?.notifyScrolling() }
         guard index != currentPage else { return }
         currentPage = index
         scrubber?.updatePage(index)
@@ -557,8 +567,11 @@ class PageScrubberView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        // repositionAlongAxis only mutates `transform`; no content pixels
+        // change, so we do NOT call setNeedsDisplay() here. Calling it on
+        // every layout pass causes an unnecessary Core Graphics redraw during
+        // UIPageViewController transitions, contributing to thermal load.
         repositionAlongAxis()
-        setNeedsDisplay()
     }
 
     // MARK: - Label visibility
