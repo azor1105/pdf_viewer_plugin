@@ -213,6 +213,9 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
             pdf.pageShadowsEnabled = true
         }
 
+        pdf.backgroundColor = .white
+        pdf.documentView?.backgroundColor = .white
+
         applyDisplayMode(to: pdf, isHorizontal: isHorizontal)
 
         pdf.document = document
@@ -220,6 +223,9 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
 
         // Insert behind the loading overlay so we can fade it out.
         container.insertSubview(pdf, at: 0)
+
+        // Hide the native scroll indicators (grabber bar).
+        hideScrollIndicators(in: pdf)
         pdfView = pdf
 
         NotificationCenter.default.addObserver(
@@ -308,6 +314,9 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
         let savedPage = currentPage
         stopScrollObservation()
         applyDisplayMode(to: pdf, isHorizontal: isHorizontal)
+        pdf.backgroundColor = .white
+        pdf.documentView?.backgroundColor = .white
+        hideScrollIndicators(in: pdf)
 
         scrubber?.removeFromSuperview()
         scrubber = nil
@@ -390,6 +399,17 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
             if let found = findScrollView(in: sub) { return found }
         }
         return nil
+    }
+
+    /// Hides all scroll indicators (the native grabber bar) inside a PDFView.
+    private func hideScrollIndicators(in view: UIView) {
+        if let sv = view as? UIScrollView {
+            sv.showsVerticalScrollIndicator   = false
+            sv.showsHorizontalScrollIndicator = false
+        }
+        for sub in view.subviews {
+            hideScrollIndicators(in: sub)
+        }
     }
 
     /// Reads the true current page from PDFKit and forces the scrubber to
