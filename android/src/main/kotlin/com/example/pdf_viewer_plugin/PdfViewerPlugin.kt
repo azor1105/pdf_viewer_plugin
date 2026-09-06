@@ -37,8 +37,10 @@ import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import kotlin.math.roundToInt
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 class PdfViewerPlugin : FlutterPlugin, ActivityAware {
 
@@ -149,6 +151,20 @@ class PdfPlatformView(
                         currentFile?.let { rebuildWithDirection(it, isHor) }
                     }
                     result.success(null)
+                }
+                "renderPage" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val page = (args?.get("page") as? Int) ?: 0
+                    val width = (args?.get("width") as? Int) ?: 800
+                    val adapter = pdfRendererAdapter
+                    if (adapter == null) {
+                        // Document still loading, or already disposed.
+                        result.success(null)
+                    } else {
+                        adapter.renderPageAsJpeg(page, width) { bytes ->
+                            result.success(bytes)
+                        }
+                    }
                 }
                 "jumpToPage" -> {
                     val page = (call.arguments as? Int) ?: 0
@@ -577,6 +593,10 @@ class FallbackPdfRendererAdapter(
 
     private val screenHeight: Int by lazy { context.resources.displayMetrics.heightPixels }
 
+    // Guards every use of [renderer] after close(): PdfRenderer crashes the
+    // process natively if a page is opened on a closed document.
+    @Volatile private var isClosed = false
+
     // Track current render zoom so bitmaps are rendered at matching resolution
     private var renderZoom = 1.0f
     // Cache key encodes both page index and zoom level
@@ -697,8 +717,70 @@ class FallbackPdfRendererAdapter(
         holder.imageView.tag = null
     }
 
+    /**
+     * Renders [position] to a JPEG [targetWidth] pixels wide and hands the
+     * bytes back on the main thread. Used to snapshot the page the reader is
+     * on for use outside the viewer; [callback] receives null if the page
+     * cannot be rendered.
+     *
+     * The work is posted to the same single-threaded executor the RecyclerView
+     * renders on, and the render itself takes the same lock, because
+     * [PdfRenderer] permits only one open page at a time across the whole
+     * document — rendering off a second thread throws IllegalStateException
+     * as soon as the user scrolls.
+     */
+    fun renderPageAsJpeg(position: Int, targetWidth: Int, callback: (ByteArray?) -> Unit) {
+        if (isClosed) {
+            callback(null)
+            return
+        }
+        try {
+            renderExecutor.execute {
+                val bytes = try {
+                    renderPageJpegSync(position, targetWidth)
+                } catch (_: Exception) {
+                    null
+                }
+                mainHandler.post { callback(bytes) }
+            }
+        } catch (_: RejectedExecutionException) {
+            // Executor already shut down by close().
+            callback(null)
+        }
+    }
+
+    @Synchronized
+    private fun renderPageJpegSync(position: Int, targetWidth: Int): ByteArray? {
+        if (isClosed) return null
+        if (position < 0 || position >= renderer.pageCount) return null
+
+        val info = pageInfoList[position]
+        if (info.width <= 0 || info.height <= 0) return null
+
+        val width = targetWidth.coerceIn(MIN_SNAPSHOT_WIDTH, MAX_SNAPSHOT_WIDTH)
+        val height = (info.height * (width.toFloat() / info.width)).roundToInt().coerceAtLeast(1)
+
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        // PDF pages are drawn with a transparent background. JPEG has no alpha
+        // channel, so without this fill every page encodes as solid black.
+        Canvas(bitmap).drawColor(Color.WHITE)
+
+        val page = renderer.openPage(position)
+        try {
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        } finally {
+            page.close()
+        }
+
+        val stream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, SNAPSHOT_JPEG_QUALITY, stream)
+        bitmap.recycle()
+        return stream.toByteArray()
+    }
+
     @Synchronized
     private fun renderPage(position: Int, zoom: Float): Bitmap? {
+        if (isClosed) return null
         if (position < 0 || position >= renderer.pageCount) return null
         val page = renderer.openPage(position)
         val info = pageInfoList[position]
@@ -716,9 +798,19 @@ class FallbackPdfRendererAdapter(
         return bitmap
     }
 
+    // Synchronized so it cannot close the renderer out from under an in-flight
+    // render on the executor thread, which would crash natively.
+    @Synchronized
     fun close() {
+        if (isClosed) return
+        isClosed = true
         pendingRenderRunnable?.let { mainHandler.removeCallbacks(it) }
-        renderExecutor.shutdownNow()
+        // Tasks that never got to run still owe their caller a reply — a
+        // dropped snapshot would otherwise leave its Dart Future pending
+        // forever. Running them inline is safe: isClosed is already set, so
+        // each one short-circuits to null instead of touching the renderer,
+        // and the monitor this method holds is reentrant.
+        renderExecutor.shutdownNow().forEach { runCatching { it.run() } }
         bitmapCache.evictAll()
         lastRenderedBitmap.clear()
         renderer.close()
@@ -726,6 +818,12 @@ class FallbackPdfRendererAdapter(
     }
 
     class PageViewHolder(val imageView: ImageView) : RecyclerView.ViewHolder(imageView)
+
+    companion object {
+        private const val MIN_SNAPSHOT_WIDTH = 200
+        private const val MAX_SNAPSHOT_WIDTH = 2000
+        private const val SNAPSHOT_JPEG_QUALITY = 80
+    }
 }
 
 /**

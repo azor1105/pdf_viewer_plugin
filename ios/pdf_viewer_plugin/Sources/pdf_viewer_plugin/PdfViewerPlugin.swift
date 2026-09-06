@@ -64,6 +64,15 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
     private var isHorizontal: Bool = false
     private var scrollObserver: NSKeyValueObservation?
 
+    /// Serial so two snapshot requests never render into PDFKit concurrently.
+    private static let snapshotQueue = DispatchQueue(
+        label: "pdf_viewer_plugin.snapshot",
+        qos: .userInitiated
+    )
+    private static let minSnapshotWidth = 200
+    private static let maxSnapshotWidth = 2000
+    private static let snapshotJpegQuality: CGFloat = 0.8
+
     init(
         frame: CGRect,
         viewId: Int64,
@@ -116,6 +125,11 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
                     self.applyScrollDirection(isHorizontal: isHor)
                 }
                 result(nil)
+            case "renderPage":
+                let args = call.arguments as? [String: Any]
+                let page = (args?["page"] as? Int) ?? 0
+                let width = (args?["width"] as? Int) ?? 800
+                self.renderPage(at: page, targetWidth: width, result: result)
             case "jumpToPage":
                 if let page = call.arguments as? Int {
                     self.jumpToPage(page)
@@ -348,6 +362,72 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
     }
 
     /// Configures display mode / direction / page-view-controller on a PDFView.
+    // MARK: - Page snapshot
+
+    /// Renders the page at [index] to a JPEG [targetWidth] points wide and
+    /// replies with its bytes, or nil when it cannot be rendered.
+    ///
+    /// Used to snapshot the page the reader is on for use outside the viewer.
+    /// The render runs on a serial background queue so a large page does not
+    /// stall the frame the user is looking at.
+    private func renderPage(at index: Int, targetWidth: Int, result: @escaping FlutterResult) {
+        guard let document = pdfView?.document,
+              index >= 0,
+              index < document.pageCount,
+              let page = document.page(at: index)
+        else {
+            result(nil)
+            return
+        }
+
+        let box = PDFDisplayBox.mediaBox
+        let pageRect = page.bounds(for: box)
+        // bounds(for:) is in unrotated page space, so a page with 90°/270°
+        // rotation renders sideways unless the axes are swapped here.
+        let quarterTurns = (page.rotation / 90) % 2
+        let contentSize = quarterTurns == 0
+            ? pageRect.size
+            : CGSize(width: pageRect.height, height: pageRect.width)
+
+        guard contentSize.width > 0, contentSize.height > 0 else {
+            result(nil)
+            return
+        }
+
+        let width = CGFloat(min(max(targetWidth, Self.minSnapshotWidth), Self.maxSnapshotWidth))
+        let scale = width / contentSize.width
+        let outputSize = CGSize(
+            width: width,
+            height: max((contentSize.height * scale).rounded(), 1)
+        )
+
+        Self.snapshotQueue.async {
+            let format = UIGraphicsImageRendererFormat()
+            // Without this the renderer multiplies by the screen scale, so an
+            // 800pt request comes back 2400px wide on a 3x device.
+            format.scale = 1
+            format.opaque = true
+
+            let image = UIGraphicsImageRenderer(size: outputSize, format: format).image { ctx in
+                // PDF pages draw with a transparent background and JPEG has no
+                // alpha channel, so fill white first.
+                UIColor.white.setFill()
+                ctx.fill(CGRect(origin: .zero, size: outputSize))
+
+                let cg = ctx.cgContext
+                // PDF coordinates are y-up; UIKit's are y-down.
+                cg.translateBy(x: 0, y: outputSize.height)
+                cg.scaleBy(x: scale, y: -scale)
+                page.draw(with: box, to: cg)
+            }
+
+            let data = image.jpegData(compressionQuality: Self.snapshotJpegQuality)
+            DispatchQueue.main.async {
+                result(data.map { FlutterStandardTypedData(bytes: $0) })
+            }
+        }
+    }
+
     private func applyDisplayMode(to pdf: PDFView, isHorizontal: Bool) {
         if isHorizontal {
             pdf.displayMode      = .singlePage

@@ -31,13 +31,47 @@ enum ScrollDirection { vertical, horizontal }
 class PdfController extends ChangeNotifier {
   MethodChannel? _channel;
   int _currentPage = 0;
+  int _pageCount = 0;
   ScrollDirection _scrollDirection = ScrollDirection.horizontal;
 
   /// The current visible page index (0-based).
   int get currentPage => _currentPage;
 
+  /// The number of pages in the attached document.
+  ///
+  /// Zero until the document has finished loading — read it after
+  /// [PdfViewer.onDocumentLoaded] has fired.
+  int get pageCount => _pageCount;
+
   /// The current scroll direction of the attached viewer.
   ScrollDirection get scrollDirection => _scrollDirection;
+
+  /// Renders [page] (0-based) to a JPEG image, [width] pixels wide.
+  ///
+  /// The height follows the page's aspect ratio. The page is drawn on a white
+  /// background, so scanned pages come out readable rather than black.
+  ///
+  /// Returns `null` when no viewer is attached, the document has not loaded
+  /// yet, [page] is out of range, or the platform failed to render — callers
+  /// are expected to degrade gracefully rather than treat this as an error.
+  ///
+  /// The render is queued behind the viewer's own page rendering, so calling
+  /// this while the user is scrolling is safe; it may simply take longer to
+  /// return.
+  Future<Uint8List?> renderPage(int page, {int width = 800}) async {
+    final channel = _channel;
+    if (channel == null) return null;
+    try {
+      return await channel.invokeMethod<Uint8List>('renderPage', {
+        'page': page,
+        'width': width,
+      });
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
 
   /// Changes the scroll direction of the attached [PdfViewer] at runtime.
   ///
@@ -278,6 +312,9 @@ class _PdfViewerState extends State<PdfViewer> {
         widget.onPageChanged?.call(page);
         widget.controller?._updatePage(page);
       } else if (call.method == 'onDocumentLoaded') {
+        // The native side sends the page count as the argument; it is the only
+        // moment it is known, so capture it before the early-out below.
+        widget.controller?._pageCount = (call.arguments as int?) ?? 0;
         if (mounted && !_isLoaded) {
           setState(() => _isLoaded = true);
           widget.onDocumentLoaded?.call();
