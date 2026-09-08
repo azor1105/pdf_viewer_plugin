@@ -205,6 +205,49 @@ class PdfPlatformView(
         }
     }
 
+    /**
+     * The page occupying the most of the visible viewport.
+     *
+     * `findFirstVisibleItemPosition()` counts a page as visible when a single pixel of it is on
+     * screen, so a sliver of the previous page left at the top outranks the page filling the rest
+     * of the viewport.  That value is what the scrubber pill shows and what the AI assistant
+     * treats as the page being read, so it has to be the page a human would name.
+     */
+    private fun dominantPage(rv: RecyclerView): Int {
+        val lm = rv.layoutManager as? LinearLayoutManager ?: return RecyclerView.NO_POSITION
+        val first = lm.findFirstVisibleItemPosition()
+        val last = lm.findLastVisibleItemPosition()
+        if (first == RecyclerView.NO_POSITION) return RecyclerView.NO_POSITION
+
+        val horizontal = lm.orientation == LinearLayoutManager.HORIZONTAL
+        // ZoomableLayout scales and translates the RecyclerView itself with pivot (0,0), so while
+        // the reader is zoomed in only a sub-range of the list's own coordinate space is actually
+        // on screen.  Map the parent's bounds back into list coordinates before measuring.
+        val parent = rv.parent as? View
+        val scale = (if (horizontal) rv.scaleX else rv.scaleY).takeIf { it > 0f } ?: 1f
+        val trans = if (horizontal) rv.translationX else rv.translationY
+        val parentSize = (if (horizontal) parent?.width else parent?.height)
+            ?.takeIf { it > 0 } ?: (if (horizontal) rv.width else rv.height)
+        val visStart = -trans / scale
+        val visEnd = (parentSize - trans) / scale
+
+        var best = first
+        var bestExtent = Float.NEGATIVE_INFINITY
+        for (pos in first..last) {
+            val v = lm.findViewByPosition(pos) ?: continue
+            val start = (if (horizontal) v.left else v.top).toFloat()
+            val end = (if (horizontal) v.right else v.bottom).toFloat()
+            val extent = minOf(end, visEnd) - maxOf(start, visStart)
+            // Strict `>` keeps the lower page on an exact 50/50 split, so the indicator does not
+            // flicker between two pages while the split hovers at the halfway point.
+            if (extent > bestExtent) {
+                bestExtent = extent
+                best = pos
+            }
+        }
+        return best
+    }
+
     private fun buildViewHierarchy(adapter: FallbackPdfRendererAdapter, isHorizontal: Boolean, initialPage: Int) {
         val recyclerView = RecyclerView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -247,8 +290,8 @@ class PdfPlatformView(
         // and shows the page-count pill while scrolling.
         fun makeScrollListener(scrubber: PageScrubberView) = object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                val lm = rv.layoutManager as? LinearLayoutManager ?: return
-                val page = lm.findFirstVisibleItemPosition()
+                val page = dominantPage(rv)
+                if (page == RecyclerView.NO_POSITION) return
                 scrubber.updatePage(page)
                 scrubber.notifyScrolling()
                 if (page != currentPage) {
@@ -275,8 +318,8 @@ class PdfPlatformView(
                         // saved position can produce no callback at all and
                         // Flutter would keep thinking we are on page 0.
                         recyclerView.post {
-                            val lm = recyclerView.layoutManager as? LinearLayoutManager
-                            val page = lm?.findFirstVisibleItemPosition() ?: initialPage
+                            val landed = dominantPage(recyclerView)
+                            val page = if (landed == RecyclerView.NO_POSITION) initialPage else landed
                             if (page >= 0 && !isDisposed) {
                                 currentPage = page
                                 channel.invokeMethod("onPageChanged", page)
