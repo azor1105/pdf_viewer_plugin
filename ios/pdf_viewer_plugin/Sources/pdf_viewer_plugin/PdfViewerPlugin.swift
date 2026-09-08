@@ -586,6 +586,11 @@ class PdfPlatformView: NSObject, FlutterPlatformView {
         let idx = document.index(for: page)
         currentPage = idx
         scrubber?.forceSetPage(idx)
+        // Report unconditionally. `refreshCurrentPage` drops any page equal to
+        // `currentPage`, which was pre-seeded with `initialPage` at creation,
+        // so an initial jump to a restored page produces no callback at all and
+        // Flutter would keep thinking the document is on page 0.
+        channel.invokeMethod("onPageChanged", arguments: idx)
     }
 
     // MARK: - Scrubber

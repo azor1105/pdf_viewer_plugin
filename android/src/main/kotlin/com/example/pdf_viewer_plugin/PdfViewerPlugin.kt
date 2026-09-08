@@ -269,6 +269,19 @@ class PdfPlatformView(
                     recyclerView.post {
                         (recyclerView.layoutManager as? LinearLayoutManager)
                             ?.scrollToPositionWithOffset(initialPage, 0)
+                        // Report the page the list actually landed on. The
+                        // scroll listener drops any page equal to currentPage,
+                        // which was pre-seeded with initialPage, so restoring a
+                        // saved position can produce no callback at all and
+                        // Flutter would keep thinking we are on page 0.
+                        recyclerView.post {
+                            val lm = recyclerView.layoutManager as? LinearLayoutManager
+                            val page = lm?.findFirstVisibleItemPosition() ?: initialPage
+                            if (page >= 0 && !isDisposed) {
+                                currentPage = page
+                                channel.invokeMethod("onPageChanged", page)
+                            }
+                        }
                     }
                 }
             }

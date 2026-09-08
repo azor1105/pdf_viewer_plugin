@@ -91,9 +91,20 @@ class PdfController extends ChangeNotifier {
     await _channel?.invokeMethod('jumpToPage', page);
   }
 
-  void _attach(MethodChannel channel, ScrollDirection initialDirection) {
+  void _attach(
+    MethodChannel channel,
+    ScrollDirection initialDirection,
+    int initialPage,
+  ) {
     _channel = channel;
     _scrollDirection = initialDirection;
+    // The native side opens the document *at* initialPage and only reports a
+    // page once it changes from the one it opened on, so a reader who restores
+    // a saved position and never scrolls produces no onPageChanged at all.
+    // Without this seed the controller would keep claiming page 0 — losing the
+    // restored position for anyone reading currentPage (a saved-page write on
+    // exit, a page indicator outside the viewer).
+    _currentPage = initialPage;
   }
 
   void _detach() {
@@ -305,7 +316,11 @@ class _PdfViewerState extends State<PdfViewer> {
   void _onPlatformViewCreated(int id) {
     final channel = MethodChannel('pdf_viewer_plugin_view/$id');
     _channel = channel;
-    widget.controller?._attach(channel, widget.scrollDirection);
+    widget.controller?._attach(
+      channel,
+      widget.scrollDirection,
+      widget.initialPage,
+    );
     channel.setMethodCallHandler((call) async {
       if (call.method == 'onPageChanged') {
         final page = call.arguments as int;
